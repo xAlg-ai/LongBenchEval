@@ -8,6 +8,7 @@ import argparse
 from omegaconf import OmegaConf
 from inf_llm.utils import patch_hf, GreedySearch, patch_model_center
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.models.llama.modeling_llama import FAISS
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -16,8 +17,11 @@ def parse_args():
     parser.add_argument("--datasets", type=str, default=None)
     parser.add_argument("--model_center", action="store_true", default=False)
     parser.add_argument("--rank", type=int, default=None)
+    parser.add_argument("--chunk_size", type=int, default=128)
     parser.add_argument("--world_size", type=int, default=None)
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--limit", type=int, default=None)
+
     args, extra_args = parser.parse_known_args()
     conf = OmegaConf.load(args.config_path)
     cli_conf = OmegaConf.from_cli(extra_args)
@@ -27,6 +31,7 @@ def parse_args():
     conf.rank = args.rank
     conf.world_size = args.world_size
     conf.verbose = args.verbose
+    conf.limit = args.limit
     if not hasattr(conf.model, "tokenizer_path"):
         conf.model.tokenizer_path = conf.model.path
     if not hasattr(conf, "truncation"):
@@ -37,6 +42,7 @@ def parse_args():
     conf.datasets = []
     for d in datasets_list:
         conf.datasets.append(d.strip())
+    conf.chunk_size = args.chunk_size
     return conf
 
 
@@ -52,8 +58,8 @@ def get_model_and_tokenizer(config):
         bmt.load(model, os.path.join(config.path, "pytorch_model.pt"), strict=False)
         model = patch_model_center(model, config.type, **config)
     else:
-        model = AutoModelForCausalLM.from_pretrained(config.path, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map="cuda")
-        model = patch_hf(model, config.type, **config)
+        model = AutoModelForCausalLM.from_pretrained(config.path, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map="cuda", attn_implementation="eager")
+        #model = patch_hf(model, config.type, **config)
     return model, tokenizer
 
 # This is the customized building prompt for chat models
@@ -198,7 +204,7 @@ def get_pred(
     max_gen, prompt_format, dataset, model_name, 
     gen_chunk_size = None, truncation: str = None, 
     rank: int = None, world_size: int = None,
-    verbose: bool = False
+    verbose: bool = False, limit=None
 ):
     preds = []
     data = list(data)
@@ -210,7 +216,15 @@ def get_pred(
     cur = 0
     total = len(data)
 
-    for json_obj in tqdm(data):
+    for i, json_obj in tqdm(enumerate(data)):
+        if len(FAISS) > 0:
+            print("resetting FAISS")
+            for _i in range(len(FAISS)):
+                for _j in range(len(FAISS[i])):
+                    FAISS[_i][_j].reset()
+            print("resetting done")
+        if limit is not None and i >= limit:
+            break
         prompt = prompt_format.format(**json_obj)
 
         extra_end_token_ids = []
@@ -256,7 +270,6 @@ def get_pred(
                 raise NotImplementedError
     
 
-        
         output = searcher.generate(
             input_ids = tokenized_prompt,
             max_length=max_gen,
@@ -274,7 +287,7 @@ def get_pred(
             print("Question:", prompt[-100:])
             print("Pred:", pred)
             print("Answer:", json_obj["answers"])
-            print("")
+            print("", flush=True)
 
 
     return preds
@@ -331,7 +344,8 @@ if __name__ == '__main__':
             args.conv_type, 
             args.chunk_size, args.truncation,
             args.rank, args.world_size,
-            args.verbose
+            args.verbose,
+            args.limit
         )
         if multiprocessing:
             out_path = out_path + f"_{args.rank}"
