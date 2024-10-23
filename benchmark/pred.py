@@ -8,7 +8,7 @@ import argparse
 from omegaconf import OmegaConf
 from inf_llm.utils import patch_hf, GreedySearch, patch_model_center
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.models.llama.modeling_llama import FAISS
+from transformers.models.llama.modeling_llama import FAISS,dump_faiss_stats
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -353,3 +353,8 @@ if __name__ == '__main__':
             for pred in preds:
                 json.dump(pred, f, ensure_ascii=False)
                 f.write('\n')
+    att_cfg_file = os.environ.get("ATT_CONFIG", None)
+    if att_cfg_file is not None:
+        basename = os.path.basename(att_cfg_file).strip('.yaml')
+        dump_faiss_stats("./logs/stats-"+basename+".npz")
+
