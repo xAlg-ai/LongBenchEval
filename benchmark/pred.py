@@ -9,6 +9,9 @@ from omegaconf import OmegaConf
 from inf_llm.utils import patch_hf, GreedySearch, patch_model_center
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.models.llama.modeling_llama import FAISS,dump_faiss_stats
+import gc
+
+att_cfg_file = os.environ.get("ATT_CONFIG", None)
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -58,7 +61,10 @@ def get_model_and_tokenizer(config):
         bmt.load(model, os.path.join(config.path, "pytorch_model.pt"), strict=False)
         model = patch_model_center(model, config.type, **config)
     else:
-        model = AutoModelForCausalLM.from_pretrained(config.path, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map="cuda", attn_implementation="eager")
+        impl = "spda"
+        if att_cfg_file is not None:
+            impl = "eager"
+        model = AutoModelForCausalLM.from_pretrained(config.path, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map="cuda", attn_implementation=impl)
         #model = patch_hf(model, config.type, **config)
     return model, tokenizer
 
@@ -217,10 +223,11 @@ def get_pred(
     total = len(data)
 
     for i, json_obj in tqdm(enumerate(data)):
+        gc.collect()
         if len(FAISS) > 0:
             print("resetting FAISS")
             for _i in range(len(FAISS)):
-                for _j in range(len(FAISS[i])):
+                for _j in range(len(FAISS[_i])):
                     FAISS[_i][_j].reset()
             print("resetting done")
         if limit is not None and i >= limit:
@@ -269,7 +276,10 @@ def get_pred(
             else:
                 raise NotImplementedError
     
-
+        print(tokenized_prompt.shape, flush=True)
+        if tokenized_prompt.shape[0] < 12000:
+            print("Skipping since it is too big for V100 to store KV Cache")
+            continue
         output = searcher.generate(
             input_ids = tokenized_prompt,
             max_length=max_gen,
