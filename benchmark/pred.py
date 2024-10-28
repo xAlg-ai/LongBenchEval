@@ -8,7 +8,7 @@ import argparse
 from omegaconf import OmegaConf
 from inf_llm.utils import patch_hf, GreedySearch, patch_model_center
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.models.llama.modeling_llama import FAISS,dump_faiss_stats
+from transformers.models.llama.modeling_llama import FAISS,dump_faiss_stats,save_usa,load_usa
 import gc
 
 att_cfg_file = os.environ.get("ATT_CONFIG", None)
@@ -24,6 +24,12 @@ def parse_args():
     parser.add_argument("--world_size", type=int, default=None)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--truncate_len", type=int, default=None)
+    parser.add_argument("--runs", type=int, default=1)
+    parser.add_argument("--save_usa", type=str, default=None)
+    parser.add_argument("--load_usa", type=str, default=None)
+
+
 
     args, extra_args = parser.parse_known_args()
     conf = OmegaConf.load(args.config_path)
@@ -35,6 +41,10 @@ def parse_args():
     conf.world_size = args.world_size
     conf.verbose = args.verbose
     conf.limit = args.limit
+    conf.runs = args.runs 
+    conf.save_usa = args.save_usa
+    conf.load_usa = args.load_usa
+    conf.truncate_len = args.truncate_len
     if not hasattr(conf.model, "tokenizer_path"):
         conf.model.tokenizer_path = conf.model.path
     if not hasattr(conf, "truncation"):
@@ -210,7 +220,9 @@ def get_pred(
     max_gen, prompt_format, dataset, model_name, 
     gen_chunk_size = None, truncation: str = None, 
     rank: int = None, world_size: int = None,
-    verbose: bool = False, limit=None
+    verbose: bool = False, limit=None,
+    truncate_len: int = None,
+    save_usa_path: str = None
 ):
     preds = []
     data = list(data)
@@ -223,6 +235,9 @@ def get_pred(
     total = len(data)
 
     for i, json_obj in tqdm(enumerate(data)):
+        
+        if i < 25:
+            continue
         gc.collect()
         if len(FAISS) > 0:
             print("resetting FAISS")
@@ -277,9 +292,8 @@ def get_pred(
                 raise NotImplementedError
     
         print(tokenized_prompt.shape, flush=True)
-        if tokenized_prompt.shape[0] < 12000:
-            print("Skipping since it is too big for V100 to store KV Cache")
-            continue
+        if truncate_len is not None:
+            tokenized_prompt = tokenized_prompt[:truncate_len]
         output = searcher.generate(
             input_ids = tokenized_prompt,
             max_length=max_gen,
@@ -298,8 +312,8 @@ def get_pred(
             print("Pred:", pred)
             print("Answer:", json_obj["answers"])
             print("", flush=True)
-
-
+        if save_usa_path is not None:
+            save_usa(save_usa_path)
     return preds
 
 
@@ -319,6 +333,8 @@ if __name__ == '__main__':
     dataset2prompt = json.load(open("benchmark/config/dataset2prompt.json", "r"))
     dataset2maxlen = json.load(open("benchmark/config/dataset2maxlen.json", "r"))
 
+    if args.load_usa is not None:
+        load_usa()
     
     multiprocessing = args.world_size is not None and args.world_size > 1
     if multiprocessing:
@@ -347,16 +363,19 @@ if __name__ == '__main__':
         prompt_format = dataset2prompt[dataset]
 
         max_gen = dataset2maxlen[dataset]
-        preds = get_pred(
-            model, tokenizer, data, 
-            args.max_len, max_gen, 
-            prompt_format, dataset, 
-            args.conv_type, 
-            args.chunk_size, args.truncation,
-            args.rank, args.world_size,
-            args.verbose,
-            args.limit
-        )
+        for run in range(args.runs): # just for USA training
+            preds = get_pred(
+                model, tokenizer, data, 
+                args.max_len, max_gen, 
+                prompt_format, dataset, 
+                args.conv_type, 
+                args.chunk_size, args.truncation,
+                args.rank, args.world_size,
+                args.verbose,
+                args.limit,
+                args.truncate_len,
+                args.save_usa
+            )
         if multiprocessing:
             out_path = out_path + f"_{args.rank}"
         with open(out_path, "w+", encoding="utf-8") as f:
