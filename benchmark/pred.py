@@ -8,7 +8,7 @@ import argparse
 from omegaconf import OmegaConf
 from inf_llm.utils import patch_hf, GreedySearch, patch_model_center
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.models.llama.modeling_llama import FAISS,dump_faiss_stats,save_usa,load_usa
+from transformers.models.llama.modeling_llama import FAISS,dump_faiss_stats,save_usa,load_usa, USA_STAT
 import gc
 
 att_cfg_file = os.environ.get("ATT_CONFIG", None)
@@ -28,6 +28,8 @@ def parse_args():
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--save_usa", type=str, default=None)
     parser.add_argument("--load_usa", type=str, default=None)
+    parser.add_argument("--skip_first_examples", type=int, default=-1)
+    parser.add_argument("--max_prompt_len", type=int, default=1000000)
 
 
 
@@ -45,6 +47,8 @@ def parse_args():
     conf.save_usa = args.save_usa
     conf.load_usa = args.load_usa
     conf.truncate_len = args.truncate_len
+    conf.skip_first_examples = args.skip_first_examples
+    conf.max_prompt_len = args.max_prompt_len
     if not hasattr(conf.model, "tokenizer_path"):
         conf.model.tokenizer_path = conf.model.path
     if not hasattr(conf, "truncation"):
@@ -71,7 +75,7 @@ def get_model_and_tokenizer(config):
         bmt.load(model, os.path.join(config.path, "pytorch_model.pt"), strict=False)
         model = patch_model_center(model, config.type, **config)
     else:
-        impl = "spda"
+        impl = "sdpa"
         if att_cfg_file is not None:
             impl = "eager"
         model = AutoModelForCausalLM.from_pretrained(config.path, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map="cuda", attn_implementation=impl)
@@ -222,8 +226,13 @@ def get_pred(
     rank: int = None, world_size: int = None,
     verbose: bool = False, limit=None,
     truncate_len: int = None,
-    save_usa_path: str = None
+    save_usa_path: str = None,
+    skip_first_examples: int = -1,
+    max_prompt_len: int = 1000000000
 ):
+    if save_usa_path is not None:
+        save_usa(save_usa_path)
+
     preds = []
     data = list(data)
 
@@ -235,8 +244,8 @@ def get_pred(
     total = len(data)
 
     for i, json_obj in tqdm(enumerate(data)):
-        
-        if i < 25:
+        if i < skip_first_examples:
+            print("skip_first_examples", i)
             continue
         gc.collect()
         if len(FAISS) > 0:
@@ -292,6 +301,9 @@ def get_pred(
                 raise NotImplementedError
     
         print(tokenized_prompt.shape, flush=True)
+        if tokenized_prompt.shape[0] > max_prompt_len or tokenized_prompt.shape[0] < 10000:
+            print("too long",tokenized_prompt.shape, "Skipping")
+            continue
         if truncate_len is not None:
             tokenized_prompt = tokenized_prompt[:truncate_len]
         output = searcher.generate(
@@ -314,6 +326,8 @@ def get_pred(
             print("", flush=True)
         if save_usa_path is not None:
             save_usa(save_usa_path)
+        if USA_STAT is not None:
+            print(USA_STAT)
     return preds
 
 
@@ -334,7 +348,8 @@ if __name__ == '__main__':
     dataset2maxlen = json.load(open("benchmark/config/dataset2maxlen.json", "r"))
 
     if args.load_usa is not None:
-        load_usa()
+        print("LOADING USA...", flush=True)
+        load_usa(args.load_usa)
     
     multiprocessing = args.world_size is not None and args.world_size > 1
     if multiprocessing:
@@ -374,7 +389,9 @@ if __name__ == '__main__':
                 args.verbose,
                 args.limit,
                 args.truncate_len,
-                args.save_usa
+                args.save_usa,
+                args.skip_first_examples,
+                args.max_prompt_len
             )
         if multiprocessing:
             out_path = out_path + f"_{args.rank}"
@@ -382,6 +399,7 @@ if __name__ == '__main__':
             for pred in preds:
                 json.dump(pred, f, ensure_ascii=False)
                 f.write('\n')
+
     att_cfg_file = os.environ.get("ATT_CONFIG", None)
     if att_cfg_file is not None:
         basename = os.path.basename(att_cfg_file).strip('.yaml')
