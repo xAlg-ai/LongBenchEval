@@ -301,7 +301,7 @@ def get_pred(
                 raise NotImplementedError
     
         print(tokenized_prompt.shape, flush=True)
-        if tokenized_prompt.shape[0] > max_prompt_len or tokenized_prompt.shape[0] < 10000:
+        if tokenized_prompt.shape[0] > max_prompt_len:
             print("too long",tokenized_prompt.shape, "Skipping")
             continue
         if truncate_len is not None:
