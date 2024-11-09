@@ -75,7 +75,7 @@ def get_model_and_tokenizer(config):
         bmt.load(model, os.path.join(config.path, "pytorch_model.pt"), strict=False)
         model = patch_model_center(model, config.type, **config)
     else:
-        impl = "sdpa"
+        impl = "eager"
         if att_cfg_file is not None:
             impl = "eager"
         model = AutoModelForCausalLM.from_pretrained(config.path, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map="cuda", attn_implementation=impl)
@@ -356,29 +356,29 @@ if __name__ == '__main__':
         assert args.rank in list(range(args.world_size))
 
     # predict on each dataset
-    for dataset in datasets:
-        dname = dataset
-        if dataset in set([
-            "kv_retrieval", "passkey", "number_string", "code_run", "code_debug", "longdialogue_qa_eng", "longbook_qa_eng", "longbook_sum_eng", "longbook_choice_eng", "longbook_qa_chn", "math_find", "math_calc"
-        ]):
-            path = "benchmark/data/infinite-bench"
-            data = load_infinite_bench(path, dname)
+    for run in range(args.runs): # for USA training
+        for dataset in datasets:
+            dname = dataset
+            if dataset in set([
+                "kv_retrieval", "passkey", "number_string", "code_run", "code_debug", "longdialogue_qa_eng", "longbook_qa_eng", "longbook_sum_eng", "longbook_choice_eng", "longbook_qa_chn", "math_find", "math_calc"
+            ]):
+                path = "benchmark/data/infinite-bench"
+                data = load_infinite_bench(path, dname)
 
-        else:
-            data = load_from_disk(
-                f"benchmark/data/longbench/{dataset}"
+            else:
+                data = load_from_disk(
+                    f"benchmark/data/longbench/{dataset}"
+                )
+
+            out_path = os.path.join(
+                output_dir_path,
+                f"{dname}.jsonl"
             )
 
-        out_path = os.path.join(
-            output_dir_path,
-            f"{dname}.jsonl"
-        )
+            print(f"Pred {dname}")
+            prompt_format = dataset2prompt[dataset]
 
-        print(f"Pred {dname}")
-        prompt_format = dataset2prompt[dataset]
-
-        max_gen = dataset2maxlen[dataset]
-        for run in range(args.runs): # just for USA training
+            max_gen = dataset2maxlen[dataset]
             preds = get_pred(
                 model, tokenizer, data, 
                 args.max_len, max_gen, 
@@ -393,12 +393,12 @@ if __name__ == '__main__':
                 args.skip_first_examples,
                 args.max_prompt_len
             )
-        if multiprocessing:
-            out_path = out_path + f"_{args.rank}"
-        with open(out_path, "w+", encoding="utf-8") as f:
-            for pred in preds:
-                json.dump(pred, f, ensure_ascii=False)
-                f.write('\n')
+            if multiprocessing:
+                out_path = out_path + f"_{args.rank}"
+            with open(out_path, "w+", encoding="utf-8") as f:
+                for pred in preds:
+                    json.dump(pred, f, ensure_ascii=False)
+                    f.write('\n')
 
     att_cfg_file = os.environ.get("ATT_CONFIG", None)
     if att_cfg_file is not None:
