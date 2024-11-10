@@ -7,9 +7,11 @@ from tqdm import tqdm
 import argparse
 from omegaconf import OmegaConf
 from inf_llm.utils import patch_hf, GreedySearch, patch_model_center
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from transformers.models.llama.modeling_llama import FAISS,dump_faiss_stats,save_usa,load_usa, USA_STAT
 import gc
+import sys
+from inf_llm.baselines.h2O_llama import convert_h2o
 
 att_cfg_file = os.environ.get("ATT_CONFIG", None)
 
@@ -30,6 +32,11 @@ def parse_args():
     parser.add_argument("--load_usa", type=str, default=None)
     parser.add_argument("--skip_first_examples", type=int, default=-1)
     parser.add_argument("--max_prompt_len", type=int, default=1000000)
+    parser.add_argument("--samples", type=int, default=None)
+    parser.add_argument("--prefetch_offset", type=int, default=1)
+
+
+    parser.add_argument('--baseline', type=str, default=None)
 
 
 
@@ -49,6 +56,9 @@ def parse_args():
     conf.truncate_len = args.truncate_len
     conf.skip_first_examples = args.skip_first_examples
     conf.max_prompt_len = args.max_prompt_len
+    conf.samples = args.samples
+    conf.baseline = args.baseline
+    conf.prefetch_offset = args.prefetch_offset
     if not hasattr(conf.model, "tokenizer_path"):
         conf.model.tokenizer_path = conf.model.path
     if not hasattr(conf, "truncation"):
@@ -60,10 +70,11 @@ def parse_args():
     for d in datasets_list:
         conf.datasets.append(d.strip())
     conf.chunk_size = args.chunk_size
+    print(conf)
     return conf
 
 
-def get_model_and_tokenizer(config):
+def get_model_and_tokenizer(config, baseline):
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path)
     if config.model_center:
         import bmtrain as bmt
@@ -79,7 +90,19 @@ def get_model_and_tokenizer(config):
         if att_cfg_file is not None:
             impl = "eager"
         model = AutoModelForCausalLM.from_pretrained(config.path, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map="cuda", attn_implementation=impl)
+        if baseline is not None:
+            assert(att_cfg_file is None)
+            if baseline == "h2o":
+                config = AutoConfig.from_pretrained(config.path)
+                config.heavy_ratio = 0.04
+                config.recent_ratio = 0.0225
+                model = convert_h2o(model, config)
+            else:
+                raise NotImplementedError
         #model = patch_hf(model, config.type, **config)
+    print(model)
+
+        
     return model, tokenizer
 
 # This is the customized building prompt for chat models
@@ -228,14 +251,17 @@ def get_pred(
     truncate_len: int = None,
     save_usa_path: str = None,
     skip_first_examples: int = -1,
-    max_prompt_len: int = 1000000000
+    max_prompt_len: int = 1000000000,
+    samples = None,
+    prefetch_offset = 1,
 ):
     if save_usa_path is not None:
         save_usa(save_usa_path)
 
     preds = []
     data = list(data)
-
+    if samples is not None:
+        data = [data[samples]]
     if world_size is not None:
         data = data[rank::world_size]
 
@@ -310,7 +336,8 @@ def get_pred(
             input_ids = tokenized_prompt,
             max_length=max_gen,
             chunk_size=gen_chunk_size,
-            extra_end_token_ids=extra_end_token_ids
+            extra_end_token_ids=extra_end_token_ids,
+            prefetch_offset=prefetch_offset
         )
 
         pred = post_process(output[0], model_name, dataset)
@@ -337,7 +364,7 @@ if __name__ == '__main__':
     args = parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # define your model
-    model, tokenizer = get_model_and_tokenizer(args.model)
+    model, tokenizer = get_model_and_tokenizer(args.model, args.baseline)
     output_dir_path = args.output_dir_path
 
     datasets = args.datasets
@@ -391,7 +418,9 @@ if __name__ == '__main__':
                 args.truncate_len,
                 args.save_usa,
                 args.skip_first_examples,
-                args.max_prompt_len
+                args.max_prompt_len,
+                args.samples,
+                args.prefetch_offset
             )
             if multiprocessing:
                 out_path = out_path + f"_{args.rank}"

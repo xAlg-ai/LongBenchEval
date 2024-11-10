@@ -32,7 +32,7 @@ class GreedySearch:
             result = self._decode(input_ids, **kwargs)
         return result
 
-    def _decode(self, input_ids, max_length=100, extra_end_token_ids=[], chunk_size: int = 4096, output=False):
+    def _decode(self, input_ids, max_length=100, extra_end_token_ids=[], chunk_size: int = 4096, output=False, prefetch_offset=1):
         if input_ids.dim() == 1:
             input_ids = input_ids[None, :]
         input_ids = input_ids.cuda()
@@ -44,13 +44,13 @@ class GreedySearch:
         past_key_values = self.past_kv
         if output:
             output_text = ""
-        
+        OFF = prefetch_offset
         for i in range(max_length + 1):
             if i == 0:
                 if chunk_size is None:
                     chunk_size = input_ids.size(1)
-                for st in range(0, input_ids.size(1) - 1, chunk_size):
-                    ed = min(input_ids.size(1) - 1, st + chunk_size)
+                for st in range(0, input_ids.size(1) - OFF, chunk_size):
+                    ed = min(input_ids.size(1) - OFF, st + chunk_size)
                     out = self.model(
                         input_ids = input_ids[:, st: ed],
                         attention_mask = attention_mask[:, :ed],
@@ -60,12 +60,22 @@ class GreedySearch:
                     )
                     logits, past_key_values = out.logits, out.past_key_values
 
+                for j in range(OFF-1): # simulating the retreival here. q = 1
+                    out = self.model(
+                        input_ids = input_ids[:, -(OFF - j):-(OFF-j-1)],
+                        attention_mask = attention_mask[:,:-(OFF-j-1)],
+                        use_cache = True,
+                        return_dict = True,
+                        past_key_values = past_key_values
+                    )
+                    logits, past_key_values = out.logits, out.past_key_values
+
                 out = self.model(
                     input_ids = input_ids[:, -1:],
                     attention_mask = attention_mask,
+                    past_key_values = past_key_values,
                     use_cache = True,
-                    return_dict = True,
-                    past_key_values = past_key_values
+                    return_dict = True
                 )
                 logits, past_key_values = out.logits, out.past_key_values
             else:
