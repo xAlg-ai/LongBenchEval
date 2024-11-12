@@ -12,6 +12,7 @@ from transformers.models.llama.modeling_llama import FAISS,dump_faiss_stats,save
 import gc
 import sys
 from inf_llm.baselines.h2O_llama import convert_h2o
+from inf_llm.baselines.doublesparse_llama import convert_kvcache_llama_heavy_recent, convert_llama_channel_config
 
 att_cfg_file = os.environ.get("ATT_CONFIG", None)
 
@@ -34,8 +35,7 @@ def parse_args():
     parser.add_argument("--max_prompt_len", type=int, default=1000000)
     parser.add_argument("--samples", type=int, default=None)
     parser.add_argument("--prefetch_offset", type=int, default=1)
-
-
+    parser.add_argument("--token_budget", type=int, default=4096)
     parser.add_argument('--baseline', type=str, default=None)
 
 
@@ -58,6 +58,7 @@ def parse_args():
     conf.max_prompt_len = args.max_prompt_len
     conf.samples = args.samples
     conf.baseline = args.baseline
+    conf.token_budget = args.token_budget
     conf.prefetch_offset = args.prefetch_offset
     if not hasattr(conf.model, "tokenizer_path"):
         conf.model.tokenizer_path = conf.model.path
@@ -74,7 +75,7 @@ def parse_args():
     return conf
 
 
-def get_model_and_tokenizer(config, baseline):
+def get_model_and_tokenizer(config, baseline, token_budget):
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path)
     if config.model_center:
         import bmtrain as bmt
@@ -97,9 +98,19 @@ def get_model_and_tokenizer(config, baseline):
                 config.heavy_ratio = 0.04
                 config.recent_ratio = 0.0225
                 model = convert_h2o(model, config)
+            elif baseline == "ds":
+                channel_path = "/data/apdesai/DoubleSparse/config/" + config.path + ".json"
+                config = AutoConfig.from_pretrained(config.path)
+                channel_config = None
+                with open(channel_path, "r") as f:
+                    channel_config = json.load(f)
+                    model = convert_kvcache_llama_heavy_recent(model, config, token_budget, 2, 2)
+                    model = convert_llama_channel_config(model, channel_config, "q")
+            elif baseline == "inf-llm":
+                model = patch_hf(model, baseline, **config)
             else:
                 raise NotImplementedError
-        #model = patch_hf(model, config.type, **config)
+            
     print(model)
 
         
@@ -364,7 +375,7 @@ if __name__ == '__main__':
     args = parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # define your model
-    model, tokenizer = get_model_and_tokenizer(args.model, args.baseline)
+    model, tokenizer = get_model_and_tokenizer(args.model, args.baseline, args.token_budget)
     output_dir_path = args.output_dir_path
 
     datasets = args.datasets

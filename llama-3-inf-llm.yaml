@@ -1,14 +1,14 @@
 model:
   type: inf-llm
-  path: meta-llama/Meta-Llama-3-8B-Instruct
+  path: meta-llama/Meta-Llama-3.1-8B-Instruct
   block_size: 128
   fattn: false
   n_init: 128
-  n_local: 4096
-  topk: 16
+  n_local: 128
+  topk: 32
   repr_topk: 4
   max_cached_block: 32
-  exc_block_size: 512
+  exc_block_size: 32
   base: 500000
   distance_scale: 1.0
 
