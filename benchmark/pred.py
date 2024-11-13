@@ -11,8 +11,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from transformers.models.llama.modeling_llama import FAISS,dump_faiss_stats,save_usa,load_usa, USA_STAT
 import gc
 import sys
-from inf_llm.baselines.h2O_llama import convert_h2o
+from inf_llm.baselines.h2O_llama_from_ds import convert_h2o,reset_h2o
 from inf_llm.baselines.doublesparse_llama import convert_kvcache_llama_heavy_recent, convert_llama_channel_config
+from inf_llm.baselines.streaming_llama import convert_streaming
+
 
 att_cfg_file = os.environ.get("ATT_CONFIG", None)
 
@@ -95,8 +97,10 @@ def get_model_and_tokenizer(config, baseline, token_budget):
             assert(att_cfg_file is None)
             if baseline == "h2o":
                 config = AutoConfig.from_pretrained(config.path)
-                config.heavy_ratio = 0.04
-                config.recent_ratio = 0.0225
+                config.heavy_budget = args.token_budget
+                config.recent_budget = 128
+                config.init_budget = 128
+
                 model = convert_h2o(model, config)
             elif baseline == "ds":
                 channel_path = "/data/apdesai/DoubleSparse/config/" + config.path + ".json"
@@ -104,10 +108,13 @@ def get_model_and_tokenizer(config, baseline, token_budget):
                 channel_config = None
                 with open(channel_path, "r") as f:
                     channel_config = json.load(f)
-                    model = convert_kvcache_llama_heavy_recent(model, config, token_budget, 2, 2)
+                    model = convert_kvcache_llama_heavy_recent(model, config, token_budget, 2, 2, )
                     model = convert_llama_channel_config(model, channel_config, "q")
             elif baseline == "inf-llm":
                 model = patch_hf(model, baseline, **config)
+            elif baseline == "streaming":
+                config = AutoConfig.from_pretrained(config.path)
+                model = convert_streaming(model, config, args.token_budget+128, 128)
             else:
                 raise NotImplementedError
             
@@ -254,7 +261,7 @@ def post_process(pred, model_name, dataset):
     return pred
 
 def get_pred(
-    model, tokenizer, data, max_length,
+    args, model, tokenizer, data, max_length,
     max_gen, prompt_format, dataset, model_name, 
     gen_chunk_size = None, truncation: str = None, 
     rank: int = None, world_size: int = None,
@@ -291,6 +298,9 @@ def get_pred(
                 for _j in range(len(FAISS[_i])):
                     FAISS[_i][_j].reset()
             print("resetting done")
+        if args.baseline is not None:
+            if args.baseline == "h2o":
+                reset_h2o(model)
         if limit is not None and i >= limit:
             break
         prompt = prompt_format.format(**json_obj)
@@ -417,7 +427,7 @@ if __name__ == '__main__':
             prompt_format = dataset2prompt[dataset]
 
             max_gen = dataset2maxlen[dataset]
-            preds = get_pred(
+            preds = get_pred(args,
                 model, tokenizer, data, 
                 args.max_len, max_gen, 
                 prompt_format, dataset, 

@@ -5,7 +5,7 @@ model:
   fattn: false
   n_init: 128
   n_local: 128
-  topk: 32
+  topk: 16
   repr_topk: 4
   max_cached_block: 32
   exc_block_size: 32
