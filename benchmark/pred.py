@@ -35,6 +35,7 @@ def parse_args():
     parser.add_argument("--load_usa", type=str, default=None)
     parser.add_argument("--skip_first_examples", type=int, default=-1)
     parser.add_argument("--max_prompt_len", type=int, default=1000000)
+    parser.add_argument("--min_prompt_len", type=int, default=-1)
     parser.add_argument("--samples", type=int, default=None)
     parser.add_argument("--prefetch_offset", type=int, default=1)
     parser.add_argument("--token_budget", type=int, default=4096)
@@ -59,6 +60,7 @@ def parse_args():
     conf.truncate_len = args.truncate_len
     conf.skip_first_examples = args.skip_first_examples
     conf.max_prompt_len = args.max_prompt_len
+    conf.min_prompt_len = args.min_prompt_len
     conf.samples = args.samples
     conf.baseline = args.baseline
     conf.token_budget = args.token_budget
@@ -286,6 +288,7 @@ def get_pred(
     save_usa_path: str = None,
     skip_first_examples: int = -1,
     max_prompt_len: int = 1000000000,
+    min_prompt_len: int = -1,
     samples = None,
     prefetch_offset = 1,
 ):
@@ -368,6 +371,9 @@ def get_pred(
         print(tokenized_prompt.shape, flush=True)
         if tokenized_prompt.shape[0] > max_prompt_len:
             print("too long",tokenized_prompt.shape, "Skipping")
+            continue
+        if tokenized_prompt.shape[0] < min_prompt_len:
+            print("too short",tokenized_prompt.shape, "Skipping")
             continue
         if truncate_len is not None:
             tokenized_prompt = tokenized_prompt[:truncate_len]
@@ -458,6 +464,7 @@ if __name__ == '__main__':
                 args.save_usa,
                 args.skip_first_examples,
                 args.max_prompt_len,
+                args.min_prompt_len,
                 args.samples,
                 args.prefetch_offset
             )

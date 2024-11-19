@@ -51,6 +51,7 @@ class GreedySearch:
                     chunk_size = input_ids.size(1)
                 for st in range(0, input_ids.size(1) - OFF, chunk_size):
                     ed = min(input_ids.size(1) - OFF, st + chunk_size)
+                    #print("st:", st, "ed:", ed)
                     out = self.model(
                         input_ids = input_ids[:, st: ed],
                         attention_mask = attention_mask[:, :ed],
@@ -61,6 +62,7 @@ class GreedySearch:
                     logits, past_key_values = out.logits, out.past_key_values
 
                 for j in range(OFF-1): # simulating the retreival here. q = 1
+                    #print("st:", input_ids.size(1) - (OFF-j))
                     out = self.model(
                         input_ids = input_ids[:, -(OFF - j):-(OFF-j-1)],
                         attention_mask = attention_mask[:,:-(OFF-j-1)],
@@ -79,6 +81,7 @@ class GreedySearch:
                 )
                 logits, past_key_values = out.logits, out.past_key_values
             else:
+                #print("st:", input_ids.size(1))
                 out = self.model(
                     input_ids = input_ids[:, -1:],
                     attention_mask = attention_mask,

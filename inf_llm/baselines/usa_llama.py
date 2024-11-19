@@ -28,7 +28,16 @@ import math
 import numpy as np
 from einops import rearrange
 
+import torch
 
+def memory_efficient_softmax(x, dim):
+    # Subtract max for numerical stability (log-sum-exp trick)
+    max_x = torch.max(x, dim=dim, keepdim=True).values
+    exp_x = torch.exp(x - max_x)
+    
+    # Compute softmax
+    softmax_x = exp_x / torch.sum(exp_x, dim=dim, keepdim=True)
+    return softmax_x
 
 #### USA ####
 class SignSTE(torch.autograd.Function):
@@ -201,6 +210,10 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
         # stateful ... needs to be reset every new example
         self.past_key_signatures = None
+
+        # memory usage reducer
+        self.use_softmax_maxtrick = False
+
     def _reset_state(self):
         self.past_key_signatures = None
 
@@ -245,6 +258,22 @@ class LlamaAttention_heavy_hitter(nn.Module):
         self.cache_budget_records.append(torch.mean(torch.sum(mask.float(), dim=-1)).mean().item())
         return mask
         
+    def ensure_gpu(self, past_key_value, device):
+        if (past_key_value is not None 
+            and  len(past_key_value.key_cache) > self.layer_idx 
+            and (not past_key_value.key_cache[self.layer_idx].is_cuda)):
+            print("onboarding layer", self.layer_idx)
+            past_key_value.key_cache[self.layer_idx] = past_key_value.key_cache[self.layer_idx].to(device)
+            past_key_value.value_cache[self.layer_idx] = past_key_value.value_cache[self.layer_idx].to(device)
+
+    def offload_if_necessary_cpu(self, past_key_value):
+        if (past_key_value is not None 
+            and  len(past_key_value.key_cache) > self.layer_idx  
+            and past_key_value.key_cache[self.layer_idx].shape[2] >=30000):
+            print("offloading layer ", self.layer_idx)
+            past_key_value.key_cache[self.layer_idx] = past_key_value.key_cache[self.layer_idx].cpu()
+            past_key_value.value_cache[self.layer_idx] = past_key_value.value_cache[self.layer_idx].cpu()
+
 
     def forward(
         self,
@@ -259,9 +288,9 @@ class LlamaAttention_heavy_hitter(nn.Module):
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
-        
+        self.ensure_gpu(past_key_value, hidden_states.device)
         if q_len > 1:
-            return self.flash_forward(
+            return_value =  self.flash_forward(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -272,6 +301,8 @@ class LlamaAttention_heavy_hitter(nn.Module):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
+            self.offload_if_necessary_cpu(past_key_value)
+            return return_value
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
@@ -331,7 +362,10 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
         
         # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        if self.use_softmax_maxtrick:
+            attn_weights = memory_efficient_softmax(attn_weights, dim=-1) # avoids upcast
+        else:
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
             
         attn_output = torch.matmul(attn_weights, value_states)
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
@@ -348,6 +382,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
         if not output_attentions:
             attn_weights = None
 
+        self.offload_if_necessary_cpu(past_key_value)
         return attn_output, attn_weights, past_key_value
 
 def load_usa_llama(config, path):
