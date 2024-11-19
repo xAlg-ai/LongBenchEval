@@ -8,13 +8,13 @@ import argparse
 from omegaconf import OmegaConf
 from inf_llm.utils import patch_hf, GreedySearch, patch_model_center
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-from transformers.models.llama.modeling_llama import FAISS,dump_faiss_stats,save_usa,load_usa, USA_STAT
+#from transformers.models.llama.modeling_llama import FAISS,dump_faiss_stats,save_usa,load_usa, USA_STAT
 import gc
 import sys
 from inf_llm.baselines.h2O_llama_from_ds import convert_h2o,reset_h2o
 from inf_llm.baselines.doublesparse_llama import convert_kvcache_llama_heavy_recent, convert_llama_channel_config
 from inf_llm.baselines.streaming_llama import convert_streaming
-
+from inf_llm.baselines.usa_llama import convert_usa, load_usa_llama, reset_usa
 
 att_cfg_file = os.environ.get("ATT_CONFIG", None)
 
@@ -115,6 +115,18 @@ def get_model_and_tokenizer(config, baseline, token_budget):
             elif baseline == "streaming":
                 config = AutoConfig.from_pretrained(config.path)
                 model = convert_streaming(model, config, args.token_budget+128, 128)
+            elif baseline == "usa":
+                config = AutoConfig.from_pretrained(config.path)
+                config.lth_init_dim = 128
+                config.lth_final_dim = 32
+                config.lth_thold = 0
+                config.init_budget = 128
+                config.heavy_budget = args.token_budget
+                config.recent_budget = 128
+                config.usa_retrieve_depth = 6
+                config.usa_eval_mode = "depthnum"
+                usa_modules = load_usa_llama(config, args.load_usa)
+                model = convert_usa(model, config, usa_modules)
             else:
                 raise NotImplementedError
             
@@ -292,15 +304,17 @@ def get_pred(
             print("skip_first_examples", i)
             continue
         gc.collect()
-        if len(FAISS) > 0:
-            print("resetting FAISS")
-            for _i in range(len(FAISS)):
-                for _j in range(len(FAISS[_i])):
-                    FAISS[_i][_j].reset()
-            print("resetting done")
+        #if len(FAISS) > 0:
+        #    print("resetting FAISS")
+        #    for _i in range(len(FAISS)):
+        #        for _j in range(len(FAISS[_i])):
+        #            FAISS[_i][_j].reset()
+        #    print("resetting done")
         if args.baseline is not None:
             if args.baseline == "h2o":
                 reset_h2o(model)
+            if args.baseline == "usa":
+                reset_usa(model)
         if limit is not None and i >= limit:
             break
         prompt = prompt_format.format(**json_obj)
@@ -374,8 +388,8 @@ def get_pred(
             print("", flush=True)
         if save_usa_path is not None:
             save_usa(save_usa_path)
-        if USA_STAT is not None:
-            print(USA_STAT)
+        #if USA_STAT is not None:
+        #    print(USA_STAT)
     return preds
 
 
@@ -395,9 +409,9 @@ if __name__ == '__main__':
     dataset2prompt = json.load(open("benchmark/config/dataset2prompt.json", "r"))
     dataset2maxlen = json.load(open("benchmark/config/dataset2maxlen.json", "r"))
 
-    if args.load_usa is not None:
-        print("LOADING USA...", flush=True)
-        load_usa(args.load_usa)
+    # if args.load_usa is not None:
+    #     print("LOADING USA...", flush=True)
+    #     load_usa(args.load_usa)
     
     multiprocessing = args.world_size is not None and args.world_size > 1
     if multiprocessing:

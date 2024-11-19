@@ -232,8 +232,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
         assert q_len == 1 # setting recent etc only works for q_len = 1 or else if you want batched processing then use 
         grouped_attn_weights[:,:,:,:self.init_const]  = float('-inf')
         grouped_attn_weights[:,:,:,-self.local_const:]  = float('-inf')
-        
-        _, indices = grouped_attn_weights.sort(dim=-1, descending=True)
+        values, indices = grouped_attn_weights.sort(dim=-1, descending=True)
         discard_indices = indices[:, :, :, self.heavy_const:]
         h2_mask.scatter_(3, discard_indices, 1)
 
