@@ -211,21 +211,17 @@ class LlamaAttention_heavy_hitter(nn.Module):
         assert q == 1
 
         if self.past_key_signatures is None:
-            # import pdb
-            # pdb.set_trace()
             span, K = self.usa_module(key_states.float(), query_states.float(), hard=True)
-            # import pdb
-            # pdb.set_trace()
             #self.past_key_signatures = K
             self.past_key_signatures = None
         else:
+            # TODO(test)
             current_q_embedding = self.usa_module.q_embedding(query_states.float(), hard=True)
             current_k_embeddings = self.usa_module.k_embedding(key_states[:,:,self.past_key_signatures.shape[-2]:,:].float(), hard=True)
             total_k_embeddings = torch.cat([self.past_key_signatures, current_k_embeddings], dim=-2)
             self.past_key_signatures = total_k_embeddings
             current_q_embedding = rearrange(current_q_embedding, 'b h t d -> (b h) t d')
             total_k_embeddings = rearrange(total_k_embeddings, 'b h s d -> (b h) d s')
-            # Preallocate attn_weights for `baddbmm`
             span = torch.empty(bsz * self.num_heads, q, k, dtype=current_q_embedding.dtype,
                                    device=current_q_embedding.device)
             span = rearrange(torch.baddbmm(span, current_q_embedding, total_k_embeddings, beta=0, alpha=1.0),
@@ -276,9 +272,6 @@ class LlamaAttention_heavy_hitter(nn.Module):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
-        # if self.layer_idx == 5:
-        #     import pdb
-        #     pdb.set_trace()
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
@@ -333,28 +326,14 @@ class LlamaAttention_heavy_hitter(nn.Module):
             attention_mask = attention_mask.masked_fill(boolean_mask == False, torch.finfo(attn_weights.dtype).min).view(1, 1, q_len, kv_seq_len)
             attn_weights = attn_weights + attention_mask
 
-        temp = attn_weights.clone()
         sparse_mask = self.compute_mask(key_states, query_states) # True = keep and False = throw away
         attn_weights.masked_fill_(torch.logical_not(sparse_mask), torch.finfo(attn_weights.dtype).min)
 
-        temp1 = attn_weights.clone()
         
         # upcast attention to fp32
-        # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        # import pdb
-        # pdb.set_trace()
-        # tx, ti = torch.sort(attn_weights, dim=-1, stable=True, descending=True)
-        #print(self.layer_idx, torch.sum(query_states).item(), tx[0,17,0][0].item())
-        # print(self.layer_idx, torch.sum(query_states).item(), tx[0,17,0][0].item(), tx[0,17,0][511].item())
-
-
-        #if self.layer_idx >= 30:
-        #    import pdb
-        #    pdb.set_trace()
             
         attn_output = torch.matmul(attn_weights, value_states)
-        #print(self.layer_idx, torch.sum(attn_output).item())
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
                 f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
