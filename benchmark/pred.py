@@ -38,6 +38,7 @@ def parse_args():
     parser.add_argument("--samples", type=int, default=None)
     parser.add_argument("--prefetch_offset", type=int, default=1)
     parser.add_argument("--token_budget", type=int, default=4096)
+    parser.add_argument("--edge_budget", type=int, default=128)
     parser.add_argument('--baseline', type=str, default=None)
 
 
@@ -98,8 +99,8 @@ def get_model_and_tokenizer(config, baseline, token_budget):
             if baseline == "h2o":
                 config = AutoConfig.from_pretrained(config.path)
                 config.heavy_budget = args.token_budget
-                config.recent_budget = 128
-                config.init_budget = 128
+                config.recent_budget = args.edge_budget
+                config.init_budget = args.edge_budget
 
                 model = convert_h2o(model, config)
             elif baseline == "ds":
@@ -108,7 +109,10 @@ def get_model_and_tokenizer(config, baseline, token_budget):
                 channel_config = None
                 with open(channel_path, "r") as f:
                     channel_config = json.load(f)
-                    model = convert_kvcache_llama_heavy_recent(model, config, token_budget, 2, 2, )
+                    model = convert_kvcache_llama_heavy_recent(model, config, heavy_const=args.token_budget, 
+                            group_factor=8, label_bits=16, init_const=args.edge_budget, local_const=args.edge_budget)
+                    #group_factor = 8 => sorted channels = 128 / 8
+                    #label_bits = 16 # no quantization
                     model = convert_llama_channel_config(model, channel_config, "q")
             elif baseline == "inf-llm":
                 model = patch_hf(model, baseline, **config)

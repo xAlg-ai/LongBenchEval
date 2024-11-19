@@ -82,6 +82,9 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
         self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
 
+    def __repr__(self):
+        return f"{super().__repr__()}\nSparsification Setting(topk:{self.heavy_const},channel_reduction:{self.group_factor},label_bits:{self.label_bits} edge:{self.init_const, self.local_const})"
+
     def forward(
         self,
         hidden_states: torch.Tensor,
