@@ -18,7 +18,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, LlamaAttention, apply_rotary_pos_emb, repeat_kv
 from transformers.cache_utils import Cache
-
+from math import sqrt
 
 def pseudo_quantize(tensor, q_bit):
     max_quant = 2 ** q_bit - 1
@@ -82,8 +82,132 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
         self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
 
+        # stats
+        self.collect_stats = False
+        self.overlaps = {}
+        self.recalls = {}
+        self.precision = {}
+        self.print_offloading_flag = False
+        self.offloading_length = 25000
+
+
     def __repr__(self):
-        return f"{super().__repr__()}\nSparsification Setting(topk:{self.heavy_const},channel_reduction:{self.group_factor},label_bits:{self.label_bits} edge:{self.init_const, self.local_const})"
+        return f"{super().__repr__()}\nSparsification Setting(topk:{self.heavy_const},channel_reduction:{self.group_factor},label_bits:{self.label_bits},edge:{self.init_const, self.local_const},stats:{self.collect_stats})"
+        
+    def compute_stats(self, hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        ):
+        ''' independent computation from forward pass to enable logging even when we do full attention
+             Expects that the KV Cache is already on the GPU and that handling is outside the function
+        '''
+
+        if (past_key_value is None or 
+            len(past_key_value.key_cache) <= self.layer_idx or
+            past_key_value.key_cache[self.layer_idx].shape[-2]  % 1024 != 0):
+            return 
+
+        # prepare keys and queries.
+        
+        bsz, q_len, _ = hidden_states.size()
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+           
+            
+        if position_embeddings is None:
+            print(
+                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+                "removed and `position_embeddings` will be mandatory."
+            )
+            cos, sin = self.rotary_emb(query_states, position_ids)
+        else:
+            cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        key_states = past_key_value.key_cache[self.layer_idx] # keys already appended in cache
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        kv_seq_len = key_states.shape[2]
+
+
+        # target
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim) 
+        # causal_mask + recent budget + init budget
+        causal_heavy_recent_mask = torch.tril(torch.ones(q_len,kv_seq_len,device=attn_weights.device), diagonal=kv_seq_len-q_len-self.local_const).bool()
+        causal_heavy_recent_mask[:,:self.init_const] = False
+        
+        attn_weights.masked_fill_(torch.logical_not(causal_heavy_recent_mask), torch.finfo(attn_weights.dtype).min)
+        target = torch.zeros_like(attn_weights)
+        _,idx = torch.topk(attn_weights, dim=-1, k=32) # [B,A,S,T]
+        view_idx = idx.view(-1,idx.shape[-1])
+        view_idx = view_idx + torch.arange(view_idx.shape[0], device=view_idx.device).reshape(-1,1) * attn_weights.shape[-1]
+        target.view(-1)[view_idx.view(-1)] = 1.0
+
+
+        # predicted # dont want it to be conditioned on retrieval algorithm .. since I just want to measure the quality
+        assert self.head_dim % self.group_factor == 0
+        assert self.sorted_channel is not None
+        sorted_query_states = query_states.transpose(1,2)
+        sorted_key_states = key_states.transpose(1,2)
+        sorted_query_states = torch.gather(sorted_query_states, -1, self.sorted_channel.unsqueeze(0).unsqueeze(0).expand(bsz, q_len, -1, -1)).transpose(1,2)
+        sorted_key_states = torch.gather(sorted_key_states, -1, self.sorted_channel.unsqueeze(0).unsqueeze(0).expand(bsz, kv_seq_len, -1, -1)).transpose(1,2)
+        # outlier channel only
+        outlier_num = self.head_dim // self.group_factor
+        grouped_query = sorted_query_states[:,:,:,:outlier_num]
+        grouped_key = sorted_key_states[:,:,:,:outlier_num]
+        # quantization
+        if self.label_bits < 16:
+            grouped_query = pseudo_quantize(grouped_query, self.label_bits)
+            grouped_key = pseudo_quantize(grouped_key, self.label_bits)
+        grouped_attn_weights = torch.matmul(grouped_query, grouped_key.transpose(2, 3)) / math.sqrt(self.head_dim // self.group_factor)
+        span = grouped_attn_weights        
+        span.masked_fill_(torch.logical_not(causal_heavy_recent_mask),torch.finfo(span.dtype).min)
+        pred = torch.zeros_like(span)
+        _,idx = torch.topk(span, dim=-1, k=kv_seq_len // 16) # [B,A,S,T]
+        view_idx = idx.view(-1,idx.shape[-1])
+        view_idx = view_idx + torch.arange(view_idx.shape[0], device=view_idx.device).reshape(-1,1) * span.shape[-1]
+        pred.view(-1)[view_idx.view(-1)] = 1.0
+
+        # stats.
+        overlap = pred * target
+        overlap_ratio = torch.sum(overlap, dim=-1) / torch.sum(target, dim=-1)
+        
+        ## add to collection
+        if kv_seq_len not in self.overlaps.keys():
+            self.overlaps[kv_seq_len] = [0,0,0,0,0] # sum, sqsum, ct, mean, std
+            
+        self.overlaps[kv_seq_len][0] += overlap_ratio.sum().item()
+        self.overlaps[kv_seq_len][1] += torch.square(overlap_ratio).sum().item()
+        self.overlaps[kv_seq_len][2] += overlap_ratio.numel()
+        self.overlaps[kv_seq_len][3] = self.overlaps[kv_seq_len][0] / self.overlaps[kv_seq_len][2]
+        self.overlaps[kv_seq_len][4] = sqrt(self.overlaps[kv_seq_len][1] / self.overlaps[kv_seq_len][2] - self.overlaps[kv_seq_len][3]**2)
+
+        if self.layer_idx == 17:
+            print(self.overlaps)        
+
+        
+    def ensure_gpu(self, past_key_value, device):
+        if (past_key_value is not None 
+            and  len(past_key_value.key_cache) > self.layer_idx 
+            and (not past_key_value.key_cache[self.layer_idx].is_cuda)):
+            #print("onboarding layer", self.layer_idx)
+            past_key_value.key_cache[self.layer_idx] = past_key_value.key_cache[self.layer_idx].to(device)
+            past_key_value.value_cache[self.layer_idx] = past_key_value.value_cache[self.layer_idx].to(device)
+
+    def offload_if_necessary_cpu(self, past_key_value):
+        if (past_key_value is not None 
+            and  len(past_key_value.key_cache) > self.layer_idx  
+            and past_key_value.key_cache[self.layer_idx].shape[2] >=self.offloading_length):
+            if self.print_offloading_flag == False:
+                print("OFFLOADING ENABLED >>")
+                self.print_offloading_flag = True
+            past_key_value.key_cache[self.layer_idx] = past_key_value.key_cache[self.layer_idx].cpu()
+            past_key_value.value_cache[self.layer_idx] = past_key_value.value_cache[self.layer_idx].cpu()
+
 
     def forward(
         self,
@@ -101,10 +225,11 @@ class LlamaAttention_heavy_hitter(nn.Module):
         # if self.config.num_hidden_layers != 32:
         #     gc.collect()
         #     torch.cuda.empty_cache()
+        self.ensure_gpu(past_key_value, hidden_states.device)
 
         
         if q_len > 1:
-            return self.flash_forward(
+            return_value =  self.flash_forward(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -115,6 +240,16 @@ class LlamaAttention_heavy_hitter(nn.Module):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
+            if self.collect_stats:
+                self.compute_stats(
+                    hidden_states,
+                    attention_mask,
+                    position_ids,
+                    past_key_value,
+                    position_embeddings
+                    )
+            self.offload_if_necessary_cpu(past_key_value)
+            return return_value
 
         if self.config.pretraining_tp > 1:
             key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
@@ -288,12 +423,12 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
 
 
-def convert_kvcache_llama_heavy_recent(model, config, heavy_const=256, group_factor=8, label_bits=4, init_const=128, local_const=128):
+def convert_kvcache_llama_heavy_recent(model, config, heavy_const, group_factor, label_bits, init_const, local_const, collect_stats):
 
     for name, module in reversed(model._modules.items()):
 
         if len(list(module.children())) > 0:
-            model._modules[name] = convert_kvcache_llama_heavy_recent(module, config, heavy_const, group_factor)
+            model._modules[name] = convert_kvcache_llama_heavy_recent(module, config, heavy_const, group_factor, label_bits, init_const, local_const, collect_stats)
 
         if isinstance(module, LlamaAttention):
             device = next(module.parameters()).device
@@ -304,6 +439,7 @@ def convert_kvcache_llama_heavy_recent(model, config, heavy_const=256, group_fac
             new_module.local_const = local_const
             new_module.group_factor = group_factor
             new_module.label_bits = label_bits
+            new_module.collect_stats = collect_stats
             model._modules[name] = new_module
             model._modules[name].flash_forward = module.forward
 

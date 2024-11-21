@@ -17,7 +17,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, LlamaAttention, apply_rotary_pos_emb, repeat_kv
 from transformers.cache_utils import Cache
-
+from math import sqrt
 
 __all__ = ['convert_kvcache_llama_heavy_recent', 'LlamaAttention_heavy_hitter']
 
@@ -38,6 +38,65 @@ def memory_efficient_softmax(x, dim):
     # Compute softmax
     softmax_x = exp_x / torch.sum(exp_x, dim=dim, keepdim=True)
     return softmax_x
+
+
+
+def evaluate_recall_precision(usa_module_ptr, position_embeddings, past_key_value, hidden_states):
+        bsz, q_len, _ = hidden_states.size()
+        query_states = usa_module_ptr.q_proj(hidden_states)
+        key_states = usa_module_ptr.k_proj(hidden_states)
+        
+        query_states = query_states.view(bsz, q_len, usa_module_ptr.num_heads, usa_module_ptr.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, usa_module_ptr.num_key_value_heads, usa_module_ptr.head_dim).transpose(1, 2)
+           
+        if position_embeddings is None:
+            print(
+                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+                "removed and `position_embeddings` will be mandatory."
+            )
+            cos, sin = usa_module_ptr.rotary_emb(key_states, position_ids)
+        else:
+            cos, sin = position_embeddings
+
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        
+        if past_key_value is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+
+        kv_seq_len = key_states.shape[-2]
+
+
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+
+        if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
+            raise ValueError(
+                f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
+                f" {attn_weights.size()}"
+            )
+
+        if attention_mask is not None:
+            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                raise ValueError(
+                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                )
+            attn_weights = attn_weights + attention_mask
+        elif q_len == kv_seq_len:
+            boolean_mask = torch.tril(torch.ones(q_len, kv_seq_len, dtype=torch.bool, device=attn_weights.device))
+            attention_mask = torch.zeros(q_len, kv_seq_len, dtype=torch.float16, device=attn_weights.device)
+            attention_mask = attention_mask.masked_fill(boolean_mask == False, torch.finfo(attn_weights.dtype).min).view(1, 1, q_len, kv_seq_len)
+            attn_weights = attn_weights + attention_mask
+
+        sparse_mask = self.compute_mask(key_states, query_states) # True = keep and False = throw away
+
+
 
 #### USA ####
 class SignSTE(torch.autograd.Function):
@@ -214,8 +273,102 @@ class LlamaAttention_heavy_hitter(nn.Module):
         # memory usage reducer
         self.use_softmax_maxtrick = False
 
+        # stats
+        self.collect_stats = False
+        self.overlaps = {}
+        self.recalls = {}
+        self.precision = {}
+        self.print_offloading_flag = False
+        self.offloading_length = 25000
+
+    def __repr__(self):
+        return f"{super().__repr__()}\nSparsification Setting(topk:{self.heavy_budget}  edge:{self.init_budget, self.recent_budget} stats:{self.collect_stats})"
+
+
     def _reset_state(self):
         self.past_key_signatures = None
+
+
+    def compute_stats(self, hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        ):
+        ''' independent computation from forward pass to enable logging even when we do full attention
+             Expects that the KV Cache is already on the GPU and that handling is outside the function
+        '''
+
+        if (past_key_value is None or 
+            len(past_key_value.key_cache) <= self.layer_idx or
+            past_key_value.key_cache[self.layer_idx].shape[-2]  % 1024 != 0):
+            return 
+
+        # prepare keys and queries.
+        
+        bsz, q_len, _ = hidden_states.size()
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+           
+            
+        if position_embeddings is None:
+            print(
+                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+                "removed and `position_embeddings` will be mandatory."
+            )
+            cos, sin = self.rotary_emb(query_states, position_ids)
+        else:
+            cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        key_states = past_key_value.key_cache[self.layer_idx] # keys already appended in cache
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        kv_seq_len = key_states.shape[2]
+
+
+        # target
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim) 
+        # causal_mask + recent budget + init budget
+        causal_heavy_recent_mask = torch.tril(torch.ones(q_len,kv_seq_len,device=attn_weights.device), diagonal=kv_seq_len-q_len-self.recent_budget).bool()
+        causal_heavy_recent_mask[:,:self.init_budget] = False
+        
+        attn_weights.masked_fill_(torch.logical_not(causal_heavy_recent_mask), torch.finfo(attn_weights.dtype).min)
+        target = torch.zeros_like(attn_weights)
+        _,idx = torch.topk(attn_weights, dim=-1, k=32) # [B,A,S,T]
+        view_idx = idx.view(-1,idx.shape[-1])
+        view_idx = view_idx + torch.arange(view_idx.shape[0], device=view_idx.device).reshape(-1,1) * attn_weights.shape[-1]
+        target.view(-1)[view_idx.view(-1)] = 1.0
+
+
+        # predicted # dont want it to be conditioned on retrieval algorithm .. since I just want to measure the quality
+        span, _ = self.usa_module(key_states.float(), query_states.float(), hard=True)
+        span.masked_fill_(torch.logical_not(causal_heavy_recent_mask),torch.finfo(span.dtype).min)
+        pred = torch.zeros_like(span)
+        _,idx = torch.topk(span, dim=-1, k=kv_seq_len // 16) # [B,A,S,T]
+        view_idx = idx.view(-1,idx.shape[-1])
+        view_idx = view_idx + torch.arange(view_idx.shape[0], device=view_idx.device).reshape(-1,1) * span.shape[-1]
+        pred.view(-1)[view_idx.view(-1)] = 1.0
+
+        # stats.
+        overlap = pred * target
+        overlap_ratio = torch.sum(overlap, dim=-1) / torch.sum(target, dim=-1)
+        
+        ## add to collection
+        if kv_seq_len not in self.overlaps.keys():
+            self.overlaps[kv_seq_len] = [0,0,0,0,0] # sum, sqsum, ct, mean, std
+            
+        self.overlaps[kv_seq_len][0] += overlap_ratio.sum().item()
+        self.overlaps[kv_seq_len][1] += torch.square(overlap_ratio).sum().item()
+        self.overlaps[kv_seq_len][2] += overlap_ratio.numel()
+        self.overlaps[kv_seq_len][3] = self.overlaps[kv_seq_len][0] / self.overlaps[kv_seq_len][2]
+        self.overlaps[kv_seq_len][4] = sqrt(self.overlaps[kv_seq_len][1] / self.overlaps[kv_seq_len][2] - self.overlaps[kv_seq_len][3]**2)
+
+        if self.layer_idx == 17:
+            print(self.overlaps)        
+
 
     def compute_mask(self, key_states, query_states):
         bsz = query_states.shape[0]
@@ -225,7 +378,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
         if self.past_key_signatures is None:
             span, K = self.usa_module(key_states.float(), query_states.float(), hard=True)
-            #self.past_key_signatures = K
+            #self.past_key_signatures = K # TODO(test)
             self.past_key_signatures = None
         else:
             # TODO(test)
@@ -255,22 +408,24 @@ class LlamaAttention_heavy_hitter(nn.Module):
             num_thold = values[:,:,:,self.heavy_budget-1:self.heavy_budget]
             thold = torch.maximum(depth_thold, num_thold)
             mask.masked_fill_(span >= thold, True)
-        self.cache_budget_records.append(torch.mean(torch.sum(mask.float(), dim=-1)).mean().item())
+        #self.cache_budget_records.append(torch.mean(torch.sum(mask.float(), dim=-1)).mean().item())
         return mask
         
     def ensure_gpu(self, past_key_value, device):
         if (past_key_value is not None 
             and  len(past_key_value.key_cache) > self.layer_idx 
             and (not past_key_value.key_cache[self.layer_idx].is_cuda)):
-            print("onboarding layer", self.layer_idx)
+            #print("onboarding layer", self.layer_idx)
             past_key_value.key_cache[self.layer_idx] = past_key_value.key_cache[self.layer_idx].to(device)
             past_key_value.value_cache[self.layer_idx] = past_key_value.value_cache[self.layer_idx].to(device)
 
     def offload_if_necessary_cpu(self, past_key_value):
         if (past_key_value is not None 
             and  len(past_key_value.key_cache) > self.layer_idx  
-            and past_key_value.key_cache[self.layer_idx].shape[2] >=30000):
-            print("offloading layer ", self.layer_idx)
+            and past_key_value.key_cache[self.layer_idx].shape[2] >=self.offloading_length):
+            if self.print_offloading_flag == False:
+                print("OFFLOADING ENABLED >>")
+                self.print_offloading_flag = True
             past_key_value.key_cache[self.layer_idx] = past_key_value.key_cache[self.layer_idx].cpu()
             past_key_value.value_cache[self.layer_idx] = past_key_value.value_cache[self.layer_idx].cpu()
 
@@ -289,6 +444,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
         self.ensure_gpu(past_key_value, hidden_states.device)
+
         if q_len > 1:
             return_value =  self.flash_forward(
                 hidden_states=hidden_states,
@@ -301,6 +457,14 @@ class LlamaAttention_heavy_hitter(nn.Module):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
+            if self.collect_stats:
+                self.compute_stats(
+                    hidden_states,
+                    attention_mask,
+                    position_ids,
+                    past_key_value,
+                    position_embeddings
+                    )
             self.offload_if_necessary_cpu(past_key_value)
             return return_value
         query_states = self.q_proj(hidden_states)
@@ -398,12 +562,12 @@ def load_usa_llama(config, path):
     USA_MOD.load_state_dict(torch.load(path))
     return USA_MOD.float().cuda()
 
-def convert_usa(model, config, usa_modules):
+def convert_usa(model, config, usa_modules, collect_stats=False):
 
     for name, module in reversed(model._modules.items()):
 
         if len(list(module.children())) > 0:
-            model._modules[name] = convert_usa(module, config, usa_modules)
+            model._modules[name] = convert_usa(module, config, usa_modules, collect_stats)
 
         if isinstance(module, LlamaAttention):
             device = next(module.parameters()).device
@@ -412,6 +576,8 @@ def convert_usa(model, config, usa_modules):
             new_module.usa_module = usa_modules[module.layer_idx]
             model._modules[name] = new_module
             model._modules[name].flash_forward = module.forward
+            model._modules[name].collect_stats = collect_stats
+            
     return model
 
 

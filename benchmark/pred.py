@@ -41,6 +41,7 @@ def parse_args():
     parser.add_argument("--token_budget", type=int, default=4096)
     parser.add_argument("--edge_budget", type=int, default=128)
     parser.add_argument('--baseline', type=str, default=None)
+    parser.add_argument('--collect_stats', action='store_true', default=False)
 
 
 
@@ -64,7 +65,9 @@ def parse_args():
     conf.samples = args.samples
     conf.baseline = args.baseline
     conf.token_budget = args.token_budget
+    conf.edge_budget = args.edge_budget
     conf.prefetch_offset = args.prefetch_offset
+    conf.collect_stats = args.collect_stats
     if not hasattr(conf.model, "tokenizer_path"):
         conf.model.tokenizer_path = conf.model.path
     if not hasattr(conf, "truncation"):
@@ -112,7 +115,8 @@ def get_model_and_tokenizer(config, baseline, token_budget):
                 with open(channel_path, "r") as f:
                     channel_config = json.load(f)
                     model = convert_kvcache_llama_heavy_recent(model, config, heavy_const=args.token_budget, 
-                            group_factor=8, label_bits=16, init_const=args.edge_budget, local_const=args.edge_budget)
+                            group_factor=8, label_bits=16, init_const=args.edge_budget, local_const=args.edge_budget,
+                            collect_stats=args.collect_stats)
                     #group_factor = 8 => sorted channels = 128 / 8
                     #label_bits = 16 # no quantization
                     model = convert_llama_channel_config(model, channel_config, "q")
@@ -132,7 +136,7 @@ def get_model_and_tokenizer(config, baseline, token_budget):
                 config.usa_retrieve_depth = 6
                 config.usa_eval_mode = "depthnum"
                 usa_modules = load_usa_llama(config, args.load_usa)
-                model = convert_usa(model, config, usa_modules)
+                model = convert_usa(model, config, usa_modules, collect_stats = args.collect_stats)
             else:
                 raise NotImplementedError
             
