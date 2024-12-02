@@ -14,7 +14,7 @@ import sys
 from inf_llm.baselines.h2O_llama_from_ds import convert_h2o,reset_h2o
 from inf_llm.baselines.doublesparse_llama import convert_kvcache_llama_heavy_recent, convert_llama_channel_config
 from inf_llm.baselines.streaming_llama import convert_streaming
-from inf_llm.baselines.usa_llama import convert_usa, load_usa_llama, reset_usa
+from inf_llm.baselines.usa_llama import convert_usa, load_usa_llama, reset_usa, set_train_usa_mode
 
 att_cfg_file = os.environ.get("ATT_CONFIG", None)
 
@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument("--edge_budget", type=int, default=128)
     parser.add_argument('--baseline', type=str, default=None)
     parser.add_argument('--collect_stats', action='store_true', default=False)
+    parser.add_argument('--train_usa', action='store_true', default=False)
 
 
 
@@ -68,6 +69,7 @@ def parse_args():
     conf.edge_budget = args.edge_budget
     conf.prefetch_offset = args.prefetch_offset
     conf.collect_stats = args.collect_stats
+    conf.train_usa = args.train_usa
     if not hasattr(conf.model, "tokenizer_path"):
         conf.model.tokenizer_path = conf.model.path
     if not hasattr(conf, "truncation"):
@@ -136,7 +138,17 @@ def get_model_and_tokenizer(config, baseline, token_budget):
                 config.usa_retrieve_depth = 6
                 config.usa_eval_mode = "depthnum"
                 usa_modules = load_usa_llama(config, args.load_usa)
-                model = convert_usa(model, config, usa_modules, collect_stats = args.collect_stats)
+                if args.train_usa:
+                    usa_modules = usa_modules.bfloat16()
+                model = convert_usa(model, config, usa_modules, collect_stats = args.collect_stats, train_usa=args.train_usa)
+
+                if args.train_usa:
+                    def loss_function(yhat ,ytarget, beta=20):
+                        weight = ytarget * (beta - 1) + torch.ones_like(ytarget)
+                        loss = torch.nn.functional.binary_cross_entropy(yhat.reshape(-1), ytarget.reshape(-1), weight = weight.reshape(-1))
+                        return loss
+                    optimizer = torch.optim.Adam(usa_modules.parameters(), lr = 0.001)
+                    set_train_usa_mode(model, loss_function, optimizer)
             else:
                 raise NotImplementedError
             

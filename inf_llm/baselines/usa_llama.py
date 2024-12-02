@@ -41,60 +41,60 @@ def memory_efficient_softmax(x, dim):
 
 
 
-def evaluate_recall_precision(usa_module_ptr, position_embeddings, past_key_value, hidden_states):
-        bsz, q_len, _ = hidden_states.size()
-        query_states = usa_module_ptr.q_proj(hidden_states)
-        key_states = usa_module_ptr.k_proj(hidden_states)
+# def evaluate_recall_precision(usa_module_ptr, position_embeddings, past_key_value, hidden_states):
+#         bsz, q_len, _ = hidden_states.size()
+#         query_states = usa_module_ptr.q_proj(hidden_states)
+#         key_states = usa_module_ptr.k_proj(hidden_states)
         
-        query_states = query_states.view(bsz, q_len, usa_module_ptr.num_heads, usa_module_ptr.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, usa_module_ptr.num_key_value_heads, usa_module_ptr.head_dim).transpose(1, 2)
+#         query_states = query_states.view(bsz, q_len, usa_module_ptr.num_heads, usa_module_ptr.head_dim).transpose(1, 2)
+#         key_states = key_states.view(bsz, q_len, usa_module_ptr.num_key_value_heads, usa_module_ptr.head_dim).transpose(1, 2)
            
-        if position_embeddings is None:
-            print(
-                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
-                "removed and `position_embeddings` will be mandatory."
-            )
-            cos, sin = usa_module_ptr.rotary_emb(key_states, position_ids)
-        else:
-            cos, sin = position_embeddings
+#         if position_embeddings is None:
+#             print(
+#                 "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+#                 "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+#                 "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+#                 "removed and `position_embeddings` will be mandatory."
+#             )
+#             cos, sin = usa_module_ptr.rotary_emb(key_states, position_ids)
+#         else:
+#             cos, sin = position_embeddings
 
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+#         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
         
-        if past_key_value is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+#         if past_key_value is not None:
+#             # sin and cos are specific to RoPE models; cache_position needed for the static cache
+#             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+#             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-
-        kv_seq_len = key_states.shape[-2]
+#         key_states = repeat_kv(key_states, self.num_key_value_groups)
+#         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+#         kv_seq_len = key_states.shape[-2]
 
-        if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
-                f" {attn_weights.size()}"
-            )
 
-        if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                )
-            attn_weights = attn_weights + attention_mask
-        elif q_len == kv_seq_len:
-            boolean_mask = torch.tril(torch.ones(q_len, kv_seq_len, dtype=torch.bool, device=attn_weights.device))
-            attention_mask = torch.zeros(q_len, kv_seq_len, dtype=torch.float16, device=attn_weights.device)
-            attention_mask = attention_mask.masked_fill(boolean_mask == False, torch.finfo(attn_weights.dtype).min).view(1, 1, q_len, kv_seq_len)
-            attn_weights = attn_weights + attention_mask
+#         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-        sparse_mask = self.compute_mask(key_states, query_states) # True = keep and False = throw away
+#         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
+#             raise ValueError(
+#                 f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
+#                 f" {attn_weights.size()}"
+#             )
+
+#         if attention_mask is not None:
+#             if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+#                 raise ValueError(
+#                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+#                 )
+#             attn_weights = attn_weights + attention_mask
+#         elif q_len == kv_seq_len:
+#             boolean_mask = torch.tril(torch.ones(q_len, kv_seq_len, dtype=torch.bool, device=attn_weights.device))
+#             attention_mask = torch.zeros(q_len, kv_seq_len, dtype=torch.float16, device=attn_weights.device)
+#             attention_mask = attention_mask.masked_fill(boolean_mask == False, torch.finfo(attn_weights.dtype).min).view(1, 1, q_len, kv_seq_len)
+#             attn_weights = attn_weights + attention_mask
+
+#         sparse_mask = self.compute_mask(key_states, query_states) # True = keep and False = throw away
 
 
 
@@ -158,8 +158,8 @@ class USA(nn.Module):
         b,a,sk,d = K.shape
         _,_,sq,d = Q.shape
 
-        Klifted = torch.zeros((b,a,sk,self.lth_final_dim), device=K.device)
-        Qlifted = torch.zeros((b,a,sq,self.lth_final_dim), device=Q.device)
+        Klifted = torch.zeros((b,a,sk,self.lth_final_dim), device=K.device, dtype=K.dtype)
+        Qlifted = torch.zeros((b,a,sq,self.lth_final_dim), device=Q.device, dtype=Q.dtype)
         
         for i in range(self.num_heads):
             Klifted[:,i,:,:] = self.learning_to_hash_transformation_k[i](K[:,i,:,:])
@@ -266,6 +266,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
         self.usa_module = None
         self.usa_retrieve_depth = config.usa_retrieve_depth
         self.usa_eval_mode = config.usa_eval_mode
+        self.usa_module_dtype = None
 
         # stateful ... needs to be reset every new example
         self.past_key_signatures = None
@@ -281,20 +282,42 @@ class LlamaAttention_heavy_hitter(nn.Module):
         self.print_offloading_flag = False
         self.offloading_length = 25000
 
+
+        #train usa
+        self.train_usa = False
+        self.tr_loss_func = None
+        self.tr_optimizer = None
+
     def __repr__(self):
-        return f"{super().__repr__()}\nSparsification Setting(topk:{self.heavy_budget}  edge:{self.init_budget, self.recent_budget} stats:{self.collect_stats})"
+        return f"{super().__repr__()}\nSparsification Setting(topk:{self.heavy_budget}  edge:{self.init_budget, self.recent_budget} stats:{self.collect_stats}\n Istraining:{self.train_usa})"
 
 
     def _reset_state(self):
         self.past_key_signatures = None
+        self.overlaps = {}
+        self.print_offloading_flag = False
 
 
-    def compute_stats(self, hidden_states: torch.Tensor,
+    @torch.inference_mode(False)
+    def train_step(self, K, Q, target, target_mask):
+        K = K.clone() # need a separate tensor for backward
+        Q = Q.clone()
+        target = target.clone()
+        span, _ = self.usa_module(K, Q) # 0,1
+        span = span.masked_fill(torch.logical_not(target_mask), 0) # remove all the fringe elements with the same mask applied to target
+        loss = self.tr_loss_func(span, target)
+        self.tr_optimizer.zero_grad()
+        loss.backward()
+        self.tr_optimizer.step()
+        if self.layer_idx == 17:
+            print(self.layer_idx, K.shape[2], "Train Loss:", loss.item(), flush=True)
+    
+
+    def usa_local_compute(self, hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        ):
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None        ):
         ''' independent computation from forward pass to enable logging even when we do full attention
              Expects that the KV Cache is already on the GPU and that handling is outside the function
         '''
@@ -342,32 +365,34 @@ class LlamaAttention_heavy_hitter(nn.Module):
         view_idx = view_idx + torch.arange(view_idx.shape[0], device=view_idx.device).reshape(-1,1) * attn_weights.shape[-1]
         target.view(-1)[view_idx.view(-1)] = 1.0
 
-
         # predicted # dont want it to be conditioned on retrieval algorithm .. since I just want to measure the quality
-        span, _ = self.usa_module(key_states.float(), query_states.float(), hard=True)
-        span.masked_fill_(torch.logical_not(causal_heavy_recent_mask),torch.finfo(span.dtype).min)
-        pred = torch.zeros_like(span)
-        _,idx = torch.topk(span, dim=-1, k=kv_seq_len // 16) # [B,A,S,T]
-        view_idx = idx.view(-1,idx.shape[-1])
-        view_idx = view_idx + torch.arange(view_idx.shape[0], device=view_idx.device).reshape(-1,1) * span.shape[-1]
-        pred.view(-1)[view_idx.view(-1)] = 1.0
+        if self.train_usa:
+            self.train_step(key_states, query_states, target, causal_heavy_recent_mask)
+        else:
+            span, _ = self.usa_module(key_states.to(self.usa_module_dtype), query_states.to(self.usa_module_dtype), hard=True)
+            span.masked_fill_(torch.logical_not(causal_heavy_recent_mask),torch.finfo(span.dtype).min)
+            pred = torch.zeros_like(span)
+            _,idx = torch.topk(span, dim=-1, k=kv_seq_len // 16) # [B,A,S,T]
+            view_idx = idx.view(-1,idx.shape[-1])
+            view_idx = view_idx + torch.arange(view_idx.shape[0], device=view_idx.device).reshape(-1,1) * span.shape[-1]
+            pred.view(-1)[view_idx.view(-1)] = 1.0
 
-        # stats.
-        overlap = pred * target
-        overlap_ratio = torch.sum(overlap, dim=-1) / torch.sum(target, dim=-1)
-        
-        ## add to collection
-        if kv_seq_len not in self.overlaps.keys():
-            self.overlaps[kv_seq_len] = [0,0,0,0,0] # sum, sqsum, ct, mean, std
+            # stats.
+            overlap = pred * target
+            overlap_ratio = torch.sum(overlap, dim=-1) / torch.sum(target, dim=-1)
             
-        self.overlaps[kv_seq_len][0] += overlap_ratio.sum().item()
-        self.overlaps[kv_seq_len][1] += torch.square(overlap_ratio).sum().item()
-        self.overlaps[kv_seq_len][2] += overlap_ratio.numel()
-        self.overlaps[kv_seq_len][3] = self.overlaps[kv_seq_len][0] / self.overlaps[kv_seq_len][2]
-        self.overlaps[kv_seq_len][4] = sqrt(self.overlaps[kv_seq_len][1] / self.overlaps[kv_seq_len][2] - self.overlaps[kv_seq_len][3]**2)
+            ## add to collection
+            if kv_seq_len not in self.overlaps.keys():
+                self.overlaps[kv_seq_len] = [0,0,0,0,0] # sum, sqsum, ct, mean, std
+                
+            self.overlaps[kv_seq_len][0] += overlap_ratio.sum().item()
+            self.overlaps[kv_seq_len][1] += torch.square(overlap_ratio).sum().item()
+            self.overlaps[kv_seq_len][2] += overlap_ratio.numel()
+            self.overlaps[kv_seq_len][3] = self.overlaps[kv_seq_len][0] / self.overlaps[kv_seq_len][2]
+            self.overlaps[kv_seq_len][4] = sqrt(self.overlaps[kv_seq_len][1] / self.overlaps[kv_seq_len][2] - self.overlaps[kv_seq_len][3]**2)
 
-        if self.layer_idx == 17:
-            print(self.overlaps)        
+            if self.layer_idx == 17:
+                print(self.overlaps)        
 
 
     def compute_mask(self, key_states, query_states):
@@ -377,13 +402,13 @@ class LlamaAttention_heavy_hitter(nn.Module):
         assert q == 1
 
         if self.past_key_signatures is None:
-            span, K = self.usa_module(key_states.float(), query_states.float(), hard=True)
+            span, K = self.usa_module(key_states.to(self.usa_module_dtype), query_states.to(self.usa_module_dtype), hard=True)
             #self.past_key_signatures = K # TODO(test)
             self.past_key_signatures = None
         else:
             # TODO(test)
-            current_q_embedding = self.usa_module.q_embedding(query_states.float(), hard=True)
-            current_k_embeddings = self.usa_module.k_embedding(key_states[:,:,self.past_key_signatures.shape[-2]:,:].float(), hard=True)
+            current_q_embedding = self.usa_module.q_embedding(query_states.to(self.usa_module_dtype), hard=True)
+            current_k_embeddings = self.usa_module.k_embedding(key_states[:,:,self.past_key_signatures.shape[-2]:,:].to(self.usa_module_dtype), hard=True)
             total_k_embeddings = torch.cat([self.past_key_signatures, current_k_embeddings], dim=-2)
             self.past_key_signatures = total_k_embeddings
             current_q_embedding = rearrange(current_q_embedding, 'b h t d -> (b h) t d')
@@ -408,7 +433,8 @@ class LlamaAttention_heavy_hitter(nn.Module):
             num_thold = values[:,:,:,self.heavy_budget-1:self.heavy_budget]
             thold = torch.maximum(depth_thold, num_thold)
             mask.masked_fill_(span >= thold, True)
-        #self.cache_budget_records.append(torch.mean(torch.sum(mask.float(), dim=-1)).mean().item())
+        # self.cache_budget_records.append(torch.mean(torch.sum(mask.float(), dim=-1)).mean().item())
+        # print(self.cache_budget_records)
         return mask
         
     def ensure_gpu(self, past_key_value, device):
@@ -423,7 +449,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
         if (past_key_value is not None 
             and  len(past_key_value.key_cache) > self.layer_idx  
             and past_key_value.key_cache[self.layer_idx].shape[2] >=self.offloading_length):
-            if self.print_offloading_flag == False:
+            if self.print_offloading_flag == False and self.layer_idx == 0:
                 print("OFFLOADING ENABLED >>")
                 self.print_offloading_flag = True
             past_key_value.key_cache[self.layer_idx] = past_key_value.key_cache[self.layer_idx].cpu()
@@ -457,8 +483,8 @@ class LlamaAttention_heavy_hitter(nn.Module):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
-            if self.collect_stats:
-                self.compute_stats(
+            if self.collect_stats or self.train_usa:
+                self.usa_local_compute(
                     hidden_states,
                     attention_mask,
                     position_ids,
@@ -559,24 +585,29 @@ def load_usa_llama(config, path):
     for i in range(config.num_hidden_layers):
         modules.append(USA(config.num_attention_heads, config.head_dim, CFG))
     USA_MOD = nn.ModuleList(modules)
-    USA_MOD.load_state_dict(torch.load(path))
-    return USA_MOD.float().cuda()
+    if path is not None:
+        USA_MOD.load_state_dict(torch.load(path))
+    return USA_MOD.cuda()
 
-def convert_usa(model, config, usa_modules, collect_stats=False):
+
+
+def convert_usa(model, config, usa_modules, collect_stats, train_usa):
 
     for name, module in reversed(model._modules.items()):
 
         if len(list(module.children())) > 0:
-            model._modules[name] = convert_usa(module, config, usa_modules, collect_stats)
+            model._modules[name] = convert_usa(module, config, usa_modules, collect_stats, train_usa)
 
         if isinstance(module, LlamaAttention):
             device = next(module.parameters()).device
             new_module = LlamaAttention_heavy_hitter(config, module.layer_idx).bfloat16().to(device)
             new_module.load_state_dict(module.state_dict())
             new_module.usa_module = usa_modules[module.layer_idx]
+            new_module.usa_module_dtype = usa_modules[module.layer_idx].learning_to_hash_transformation_k[0][0].weight.dtype
             model._modules[name] = new_module
             model._modules[name].flash_forward = module.forward
             model._modules[name].collect_stats = collect_stats
+            model._modules[name].train_usa = train_usa
             
     return model
 
@@ -590,5 +621,50 @@ def reset_usa(model):
 
         if isinstance(module, LlamaAttention_heavy_hitter):
             module._reset_state()
+
+    return model
+
+
+def set_train_usa_mode(model, loss_func=None, optimizer=None):
+
+    for name, module in reversed(model._modules.items()):
+
+        if len(list(module.children())) > 0:
+            model._modules[name] = set_train_usa_mode(module, loss_func, optimizer)
+
+        if isinstance(module, LlamaAttention_heavy_hitter):
+            module.train_usa = True
+            if loss_func is not None:
+                module.tr_loss_func = loss_func
+            if optimizer is not None:
+                module.tr_optimizer = optimizer
+
+    return model
+
+
+def set_eval_usa_mode(model):
+
+    for name, module in reversed(model._modules.items()):
+
+        if len(list(module.children())) > 0:
+            model._modules[name] = set_eval_usa_mode(module)
+
+        if isinstance(module, LlamaAttention_heavy_hitter):
+            module.train_usa = False
+
+    return model
+
+
+def print_stats(model):
+
+    for name, module in reversed(model._modules.items()):
+
+        if len(list(module.children())) > 0:
+            model._modules[name] = print_stats(module)
+
+        if isinstance(module, LlamaAttention_heavy_hitter):
+            if module.layer_idx == 17:
+                print(module.layer_idx)
+                print(module.overlaps)
 
     return model
