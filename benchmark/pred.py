@@ -16,7 +16,7 @@ from inf_llm.baselines.doublesparse_llama import convert_kvcache_llama_heavy_rec
 from inf_llm.baselines.streaming_llama import convert_streaming
 from inf_llm.baselines.usa_llama import convert_usa, load_usa_llama, reset_usa, set_train_usa_mode
 from inf_llm.baselines.quest_attention import enable_quest_attention_eval
-#from inf_llm.baselines.quest import convert_quest, reset_quest
+from inf_llm.baselines.quest import convert_quest
 
 att_cfg_file = os.environ.get("ATT_CONFIG", None)
 
@@ -119,24 +119,24 @@ def get_model_and_tokenizer(config, baseline, token_budget):
                 with open(channel_path, "r") as f:
                     channel_config = json.load(f)
                     model = convert_kvcache_llama_heavy_recent(model, config, heavy_const=args.token_budget, 
-                            group_factor=8, label_bits=16, init_const=args.edge_budget, local_const=args.edge_budget,
+                            group_factor=8, label_bits=4, init_const=args.edge_budget, local_const=args.edge_budget,
                             collect_stats=args.collect_stats)
                     #group_factor = 8 => sorted channels = 128 / 8
-                    #label_bits = 16 # no quantization
+                    #label_bits = 16 # no quantization ; 4 => 4 bit quantization
                     model = convert_llama_channel_config(model, channel_config, "q")
             elif baseline == "inf-llm":
                 model = patch_hf(model, baseline, **config)
             elif baseline == "streaming":
                 config = AutoConfig.from_pretrained(config.path)
-                model = convert_streaming(model, config, args.token_budget+128, 128)
+                model = convert_streaming(model, config, args.token_budget+args.edge_budget, args.edge_budget)
             elif baseline == "usa":
                 config = AutoConfig.from_pretrained(config.path)
                 config.lth_init_dim = 128
                 config.lth_final_dim = 32
                 config.lth_thold = 0
-                config.init_budget = 128
+                config.init_budget = args.edge_budget
                 config.heavy_budget = args.token_budget
-                config.recent_budget = 128
+                config.recent_budget = args.edge_budget
                 config.usa_retrieve_depth = 6
                 config.usa_eval_mode = "depthnum"
                 usa_modules = load_usa_llama(config, args.load_usa)
@@ -153,14 +153,17 @@ def get_model_and_tokenizer(config, baseline, token_budget):
                     set_train_usa_mode(model, loss_function, optimizer)
             elif baseline == "quest":
                 config = AutoConfig.from_pretrained(config.path)
-                #config.heavy_budget = args.token_budget
-                #config.chunk_size = 16
-                #config.init_budget = 128
-                #config.recent_budget = 128
-                #model = convert_quest(model, config, collect_stats=args.collect_stats)
+                config.token_budget = args.token_budget
+                config.chunk_size = 16
+                config.init_budget = args.edge_budget
+                config.recent_budget = args.edge_budget
+                config.label_bits = 4
+                model = convert_quest(model, config, collect_stats=args.collect_stats)
 
+            elif baseline == "quest_original":
                 config.chunk_size = 32
                 config.token_budget = args.token_budget
+                config.edge_budget = args.edge_budget
                 model = enable_quest_attention_eval(model, config)
             else:
                 raise NotImplementedError

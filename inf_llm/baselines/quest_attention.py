@@ -205,6 +205,9 @@ def forward(
     token_budget = min(kv_seq_len, self.token_budget)
 
     attn_weights_for_selection = quantized_weight
+    # remove edge from topk selection
+    attn_weights_for_selection[:,:,:,:self.edge_budget] = torch.finfo(quantized_weight.dtype).min
+    attn_weights_for_selection[:,:,:,-self.edge_budget:] = torch.finfo(quantized_weight.dtype).min
 
     if token_budget > 0:
         mask_bottom = local_heavy_hitter_mask(
@@ -214,8 +217,9 @@ def forward(
         mask_bottom = torch.zeros_like(attn_weights_for_selection, dtype=torch.bool)
 
     mask_bottom = torch.tril(mask_bottom, diagonal=position_ids[0][0].item())
+    mask_bottom[:,:,:,:self.edge_budget] = True
+    mask_bottom[:,:,:,-self.edge_budget:] = True
     attn_weights[~mask_bottom] = torch.tensor(torch.finfo(attn_weights.dtype).min)
-
     # upcast attention to fp32
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
         query_states.dtype
@@ -262,5 +266,6 @@ def enable_quest_attention_eval(model, args):
             )
 
             model._modules[name].token_budget = args.token_budget
+            model._modules[name].edge_budget = args.edge_budget
             model._modules[name].chunk_size = args.chunk_size
     return model
