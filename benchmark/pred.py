@@ -15,6 +15,8 @@ from inf_llm.baselines.h2O_llama_from_ds import convert_h2o,reset_h2o
 from inf_llm.baselines.doublesparse_llama import convert_kvcache_llama_heavy_recent, convert_llama_channel_config
 from inf_llm.baselines.streaming_llama import convert_streaming
 from inf_llm.baselines.usa_llama import convert_usa, load_usa_llama, reset_usa, set_train_usa_mode
+from inf_llm.baselines.quest_attention import enable_quest_attention_eval
+#from inf_llm.baselines.quest import convert_quest, reset_quest
 
 att_cfg_file = os.environ.get("ATT_CONFIG", None)
 
@@ -149,6 +151,17 @@ def get_model_and_tokenizer(config, baseline, token_budget):
                         return loss
                     optimizer = torch.optim.Adam(usa_modules.parameters(), lr = 0.001)
                     set_train_usa_mode(model, loss_function, optimizer)
+            elif baseline == "quest":
+                config = AutoConfig.from_pretrained(config.path)
+                #config.heavy_budget = args.token_budget
+                #config.chunk_size = 16
+                #config.init_budget = 128
+                #config.recent_budget = 128
+                #model = convert_quest(model, config, collect_stats=args.collect_stats)
+
+                config.chunk_size = 32
+                config.token_budget = args.token_budget
+                model = enable_quest_attention_eval(model, config)
             else:
                 raise NotImplementedError
             
