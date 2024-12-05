@@ -45,7 +45,7 @@ def parse_args():
     parser.add_argument('--baseline', type=str, default=None)
     parser.add_argument('--collect_stats', action='store_true', default=False)
     parser.add_argument('--train_usa', action='store_true', default=False)
-
+    parser.add_argument('--usa_ret_mode', type=str, default='depthnum')
 
 
     args, extra_args = parser.parse_known_args()
@@ -72,6 +72,7 @@ def parse_args():
     conf.prefetch_offset = args.prefetch_offset
     conf.collect_stats = args.collect_stats
     conf.train_usa = args.train_usa
+    conf.usa_ret_mode = args.usa_ret_mode
     if not hasattr(conf.model, "tokenizer_path"):
         conf.model.tokenizer_path = conf.model.path
     if not hasattr(conf, "truncation"):
@@ -138,7 +139,7 @@ def get_model_and_tokenizer(config, baseline, token_budget):
                 config.heavy_budget = args.token_budget
                 config.recent_budget = args.edge_budget
                 config.usa_retrieve_depth = 6
-                config.usa_eval_mode = "depthnum"
+                config.usa_eval_mode = args.usa_ret_mode
                 usa_modules = load_usa_llama(config, args.load_usa)
                 if args.train_usa:
                     usa_modules = usa_modules.bfloat16()

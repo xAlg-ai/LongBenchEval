@@ -289,7 +289,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
         self.tr_optimizer = None
 
     def __repr__(self):
-        return f"{super().__repr__()}\nSparsification Setting(topk:{self.heavy_budget}  edge:{self.init_budget, self.recent_budget} stats:{self.collect_stats}\n Istraining:{self.train_usa})"
+        return f"{super().__repr__()}\nSparsification Setting(topk:{self.heavy_budget}  edge:{self.init_budget, self.recent_budget} \n eval_mode:{self.usa_eval_mode} stats:{self.collect_stats}\n Istraining:{self.train_usa} )"
 
 
     def _reset_state(self):
