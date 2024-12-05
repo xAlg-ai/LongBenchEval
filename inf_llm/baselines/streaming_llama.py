@@ -133,6 +133,28 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
         self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
 
+        self.print_offloading_flag = False
+        self.offloading_length = 25000
+
+
+    def ensure_gpu(self, past_key_value, device):
+        if (past_key_value is not None 
+            and  len(past_key_value.key_cache) > self.layer_idx 
+            and (not past_key_value.key_cache[self.layer_idx].is_cuda)):
+            #print("onboarding layer", self.layer_idx)
+            past_key_value.key_cache[self.layer_idx] = past_key_value.key_cache[self.layer_idx].to(device)
+            past_key_value.value_cache[self.layer_idx] = past_key_value.value_cache[self.layer_idx].to(device)
+
+    def offload_if_necessary_cpu(self, past_key_value):
+        if (past_key_value is not None 
+            and  len(past_key_value.key_cache) > self.layer_idx  
+            and past_key_value.key_cache[self.layer_idx].shape[2] >=self.offloading_length):
+            if self.print_offloading_flag == False and self.layer_idx == 0:
+                print("OFFLOADING ENABLED >>")
+                self.print_offloading_flag = True
+            past_key_value.key_cache[self.layer_idx] = past_key_value.key_cache[self.layer_idx].cpu()
+            past_key_value.value_cache[self.layer_idx] = past_key_value.value_cache[self.layer_idx].cpu()
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -147,8 +169,9 @@ class LlamaAttention_heavy_hitter(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
         
+        self.ensure_gpu(past_key_value, hidden_states.device)
         if q_len > 1:
-            return self.flash_forward(
+            return_value =  self.flash_forward(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -159,6 +182,9 @@ class LlamaAttention_heavy_hitter(nn.Module):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
+
+            self.offload_if_necessary_cpu(past_key_value)
+            return return_value
 
         if self.config.pretraining_tp > 1:
             key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
