@@ -39,7 +39,7 @@ def parse_args():
     parser.add_argument("--skip_first_examples", type=int, default=-1)
     parser.add_argument("--max_prompt_len", type=int, default=1000000)
     parser.add_argument("--min_prompt_len", type=int, default=-1)
-    parser.add_argument("--samples", type=int, default=None)
+    parser.add_argument("--samples", type=str, default=None)
     parser.add_argument("--prefetch_offset", type=int, default=1)
     parser.add_argument("--token_budget", type=int, default=4096)
     parser.add_argument("--edge_budget", type=int, default=128)
@@ -72,7 +72,12 @@ def parse_args():
     conf.skip_first_examples = args.skip_first_examples
     conf.max_prompt_len = args.max_prompt_len
     conf.min_prompt_len = args.min_prompt_len
-    conf.samples = args.samples
+    if args.samples is not None:
+        samples = []
+        samples = [ int(x) for x in args.samples.strip().split(',')]
+        conf.samples = samples
+    else:
+        conf.samples = None
     conf.baseline = args.baseline
     conf.token_budget = args.token_budget
     conf.edge_budget = args.edge_budget
@@ -352,7 +357,7 @@ def get_pred(
     preds = []
     data = list(data)
     if samples is not None:
-        data = [data[samples]]
+        data = [data[i] for i in samples]
     if world_size is not None:
         data = data[rank::world_size]
 

@@ -135,7 +135,8 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
         self.print_offloading_flag = False
         self.offloading_length = 25000
-
+    def __repr__(self):
+        return f"{super().__repr__()}\nSparsification Setting(edge:{self.sink_const, self.local_const}"
 
     def ensure_gpu(self, past_key_value, device):
         if (past_key_value is not None 
