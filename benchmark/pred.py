@@ -46,7 +46,10 @@ def parse_args():
     parser.add_argument('--collect_stats', action='store_true', default=False)
     parser.add_argument('--train_usa', action='store_true', default=False)
     parser.add_argument('--usa_ret_mode', type=str, default='depthnum')
-
+    parser.add_argument('--ds_num_channels', type=int, default=16)
+    parser.add_argument('--ds_label_bits', type=int, default=4)
+    parser.add_argument('--quest_page_size', type=int, default=16)
+    parser.add_argument('--quest_label_bits', type=int, default=4)
 
     args, extra_args = parser.parse_known_args()
     conf = OmegaConf.load(args.config_path)
@@ -73,6 +76,10 @@ def parse_args():
     conf.collect_stats = args.collect_stats
     conf.train_usa = args.train_usa
     conf.usa_ret_mode = args.usa_ret_mode
+    conf.ds_num_channels = args.ds_num_channels
+    conf.ds_label_bits = args.ds_label_bits
+    conf.quest_page_size = args.quest_page_size
+    conf.quest_label_bits = args.quest_label_bits
     if not hasattr(conf.model, "tokenizer_path"):
         conf.model.tokenizer_path = conf.model.path
     if not hasattr(conf, "truncation"):
@@ -120,7 +127,7 @@ def get_model_and_tokenizer(config, baseline, token_budget):
                 with open(channel_path, "r") as f:
                     channel_config = json.load(f)
                     model = convert_kvcache_llama_heavy_recent(model, config, heavy_const=args.token_budget, 
-                            group_factor=8, label_bits=4, init_const=args.edge_budget, local_const=args.edge_budget,
+                            group_factor=128//args.ds_num_channels, label_bits=args.ds_label_bits, init_const=args.edge_budget, local_const=args.edge_budget,
                             collect_stats=args.collect_stats)
                     #group_factor = 8 => sorted channels = 128 / 8
                     #label_bits = 16 # no quantization ; 4 => 4 bit quantization
@@ -155,10 +162,10 @@ def get_model_and_tokenizer(config, baseline, token_budget):
             elif baseline == "quest":
                 config = AutoConfig.from_pretrained(config.path)
                 config.token_budget = args.token_budget
-                config.chunk_size = 16
+                config.chunk_size = args.quest_page_size
                 config.init_budget = args.edge_budget
                 config.recent_budget = args.edge_budget
-                config.label_bits = 4
+                config.label_bits = args.quest_label_bits
                 model = convert_quest(model, config, collect_stats=args.collect_stats)
 
             elif baseline == "quest_original":

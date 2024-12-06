@@ -102,6 +102,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
              Expects that the KV Cache is already on the GPU and that handling is outside the function
         '''
 
+        raise NotImplementedError
         if (past_key_value is None or 
             len(past_key_value.key_cache) <= self.layer_idx or
             past_key_value.key_cache[self.layer_idx].shape[-2]  % 1024 != 0):
