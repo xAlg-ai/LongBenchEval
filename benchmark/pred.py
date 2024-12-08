@@ -17,6 +17,7 @@ from inf_llm.baselines.streaming_llama import convert_streaming
 from inf_llm.baselines.usa_llama import convert_usa, load_usa_llama, reset_usa, set_train_usa_mode
 from inf_llm.baselines.quest_attention import enable_quest_attention_eval
 from inf_llm.baselines.quest import convert_quest
+from inf_llm.baselines.topk_llama import convert_exact_topk
 
 att_cfg_file = os.environ.get("ATT_CONFIG", None)
 
@@ -128,7 +129,7 @@ def get_model_and_tokenizer(config, baseline, token_budget):
 
                 model = convert_h2o(model, config)
             elif baseline == "ds":
-                channel_path = "/home/apd10/DoubleSparse/config/" + config.path + ".json"
+                channel_path = "/data/apdesai/DoubleSparse/config/" + config.path + ".json"
                 config = AutoConfig.from_pretrained(config.path)
                 channel_config = None
                 with open(channel_path, "r") as f:
@@ -180,6 +181,12 @@ def get_model_and_tokenizer(config, baseline, token_budget):
                 config.token_budget = args.token_budget
                 config.edge_budget = args.edge_budget
                 model = enable_quest_attention_eval(model, config)
+            elif baseline == "exact":
+                config = AutoConfig.from_pretrained(config.path)
+                config.token_budget = args.token_budget
+                config.init_budget = args.edge_budget
+                config.recent_budget = args.edge_budget
+                model = convert_exact_topk(model, config)
             else:
                 raise NotImplementedError
             
