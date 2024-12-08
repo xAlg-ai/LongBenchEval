@@ -50,6 +50,9 @@ def parse_args():
     parser.add_argument('--ds_label_bits', type=int, default=4)
     parser.add_argument('--quest_page_size', type=int, default=16)
     parser.add_argument('--quest_label_bits', type=int, default=4)
+    parser.add_argument('--infllm_topk', type=int, default=16)
+    parser.add_argument('--infllm_repr_topk', type=int, default=4)
+    parser.add_argument('--infllm_exc_block_size', type=int, default=32)
 
     args, extra_args = parser.parse_known_args()
     conf = OmegaConf.load(args.config_path)
@@ -80,6 +83,10 @@ def parse_args():
     conf.ds_label_bits = args.ds_label_bits
     conf.quest_page_size = args.quest_page_size
     conf.quest_label_bits = args.quest_label_bits
+    conf.model.topk = args.infllm_topk
+    conf.model.repr_topk = args.infllm_repr_topk
+    conf.model.exc_block_size = args.infllm_exc_block_size
+
     if not hasattr(conf.model, "tokenizer_path"):
         conf.model.tokenizer_path = conf.model.path
     if not hasattr(conf, "truncation"):
@@ -121,7 +128,7 @@ def get_model_and_tokenizer(config, baseline, token_budget):
 
                 model = convert_h2o(model, config)
             elif baseline == "ds":
-                channel_path = "/data/apdesai/DoubleSparse/config/" + config.path + ".json"
+                channel_path = "/home/apd10/DoubleSparse/config/" + config.path + ".json"
                 config = AutoConfig.from_pretrained(config.path)
                 channel_config = None
                 with open(channel_path, "r") as f:
@@ -447,6 +454,11 @@ if __name__ == '__main__':
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     args = parse_args()
+
+    dump_cfg = args.output_dir_path + "config." + '-'.join(args.datasets) + '.yaml'
+    with open(dump_cfg, "w") as f:
+        OmegaConf.save(config=args, f=dump_cfg)
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # define your model
     model, tokenizer = get_model_and_tokenizer(args.model, args.baseline, args.token_budget)
