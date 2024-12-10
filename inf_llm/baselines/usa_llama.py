@@ -294,7 +294,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
     def _reset_state(self):
         self.past_key_signatures = None
-        self.overlaps = {}
+        #self.overlaps = {}
         self.print_offloading_flag = False
 
 
