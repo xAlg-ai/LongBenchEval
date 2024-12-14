@@ -41,7 +41,7 @@ def parse_args():
     parser.add_argument("--min_prompt_len", type=int, default=-1)
     parser.add_argument("--samples", type=str, default=None)
     parser.add_argument("--prefetch_offset", type=int, default=1)
-    parser.add_argument("--token_budget", type=int, default=4096)
+    parser.add_argument("--token_budget", type=float, default=4096)
     parser.add_argument("--edge_budget", type=int, default=128)
     parser.add_argument('--baseline', type=str, default=None)
     parser.add_argument('--collect_stats', action='store_true', default=False)

@@ -416,8 +416,12 @@ class LlamaAttention_heavy_hitter(nn.Module):
                 quantized_weight, torch.tensor(torch.finfo(quantized_weight.dtype).min)
             )
     
-        token_budget = min(kv_seq_len, self.token_budget)
-    
+        if self.token_budget > 1.0:
+            token_budget = int(self.token_budget)
+        else:
+            token_budget = int(kv_seq_len * self.token_budget)
+
+        token_budget = min(kv_seq_len, token_budget)
         attn_weights_for_selection = quantized_weight
         # remove edge from topk selection
         attn_weights_for_selection[:,:,:,:self.init_budget] = torch.finfo(quantized_weight.dtype).min

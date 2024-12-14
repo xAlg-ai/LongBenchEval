@@ -309,7 +309,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
         self.tr_optimizer.zero_grad()
         loss.backward()
         self.tr_optimizer.step()
-        if self.layer_idx == 17:
+        if self.layer_idx == 5:
             print(self.layer_idx, K.shape[2], "Train Loss:", loss.item(), flush=True)
     
 
@@ -391,9 +391,8 @@ class LlamaAttention_heavy_hitter(nn.Module):
             self.overlaps[kv_seq_len][3] = self.overlaps[kv_seq_len][0] / self.overlaps[kv_seq_len][2]
             self.overlaps[kv_seq_len][4] = sqrt(self.overlaps[kv_seq_len][1] / self.overlaps[kv_seq_len][2] - self.overlaps[kv_seq_len][3]**2)
 
-            if self.layer_idx == 17:
-                print(self.overlaps)        
-
+            if self.layer_idx == 5:
+                print(self.overlaps) 
 
     def compute_mask(self, key_states, query_states):
         bsz = query_states.shape[0]
@@ -425,12 +424,17 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
         span.masked_fill_(mask, torch.finfo(span.dtype).min)
         values, indices = span.sort(dim=-1, descending=True)
+        if self.heavy_budget > 1.0:
+            heavy_budget = int(self.heavy_budget)
+        else:
+            heavy_budget = int(k * self.heavy_budget)
+        heavy_budget = heavy_budget
         if self.usa_eval_mode == 'simple':
-            keep_indices = indices[:,:,:,:self.heavy_budget]
+            keep_indices = indices[:,:,:,:heavy_budget]
             mask.scatter_(3, keep_indices, True)
         else:
             depth_thold = values[:,:,:,:1] - 2*self.usa_retrieve_depth # every mismatch addds a diff of 2
-            num_thold = values[:,:,:,self.heavy_budget-1:self.heavy_budget]
+            num_thold = values[:,:,:,heavy_budget-1:heavy_budget]
             thold = torch.maximum(depth_thold, num_thold)
             mask.masked_fill_(span >= thold, True)
         # self.cache_budget_records.append(torch.mean(torch.sum(mask.float(), dim=-1)).mean().item())
@@ -663,7 +667,7 @@ def print_stats(model):
             model._modules[name] = print_stats(module)
 
         if isinstance(module, LlamaAttention_heavy_hitter):
-            if module.layer_idx == 17:
+            if module.layer_idx == 5:
                 print(module.layer_idx)
                 print(module.overlaps)
 

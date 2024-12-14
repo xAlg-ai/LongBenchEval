@@ -368,10 +368,16 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
         # recent and init mask on weights to remove from topk computation
         assert q_len == 1 # setting recent etc only works for q_len = 1 or else if you want batched processing then use 
+
+        if self.heavy_const > 1.0:
+            heavy_const = int(self.heavy_const)
+        else:
+            heavy_const = int(kv_seq_len * self.heavy_const)
+
         grouped_attn_weights[:,:,:,:self.init_const]  = float('-inf')
         grouped_attn_weights[:,:,:,-self.local_const:]  = float('-inf')
         values, indices = grouped_attn_weights.sort(dim=-1, descending=True)
-        discard_indices = indices[:, :, :, self.heavy_const:]
+        discard_indices = indices[:, :, :, heavy_const:]
         h2_mask.scatter_(3, discard_indices, 1)
 
         # recent and local

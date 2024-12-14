@@ -216,7 +216,7 @@ def train(
 
 def get_dataset(dataset):
     if dataset == "openwebtext":
-        dataset =  load_dataset("Skylion007/openwebtext")
+        dataset =  load_dataset("Skylion007/openwebtext", trust_remote_code=True)
         data = dataset['train']
     # benchmark datasets
     elif dataset in set([
