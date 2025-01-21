@@ -1,0 +1,8 @@
+model:
+  type: origin
+  path: mistralai/Mistral-7B-Instruct-v0.3
+
+max_len: 32768
+chunk_size: 128
+conv_type: mistral-inst
+truncation: suffix
