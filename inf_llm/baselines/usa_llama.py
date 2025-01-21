@@ -394,6 +394,54 @@ class LlamaAttention_heavy_hitter(nn.Module):
             if self.layer_idx == 5:
                 print(self.overlaps) 
 
+
+    def compute_mask_multi(self, key_states, query_states):
+        bsz = query_states.shape[0]
+        q = query_states.shape[-2]
+        k = key_states.shape[-2]
+        if self.past_key_signatures is None:
+            span, K = self.usa_module(key_states.to(self.usa_module_dtype), query_states.to(self.usa_module_dtype), hard=True)
+            #self.past_key_signatures = K # TODO(test)
+            self.past_key_signatures = None
+        else:
+            # TODO(test)
+            current_q_embedding = self.usa_module.q_embedding(query_states.to(self.usa_module_dtype), hard=True)
+            current_k_embeddings = self.usa_module.k_embedding(key_states[:,:,self.past_key_signatures.shape[-2]:,:].to(self.usa_module_dtype), hard=True)
+            total_k_embeddings = torch.cat([self.past_key_signatures, current_k_embeddings], dim=-2)
+            self.past_key_signatures = total_k_embeddings
+            current_q_embedding = rearrange(current_q_embedding, 'b h t d -> (b h) t d')
+            total_k_embeddings = rearrange(total_k_embeddings, 'b h s d -> (b h) d s')
+            span = torch.empty(bsz * self.num_heads, q, k, dtype=current_q_embedding.dtype,
+                                   device=current_q_embedding.device)
+            span = rearrange(torch.baddbmm(span, current_q_embedding, total_k_embeddings, beta=0, alpha=1.0),
+                                 '(b h) t s -> b h t s', h=self.num_heads)
+
+
+        causal_heavy_recent_mask = torch.tril(torch.ones(q,k,device=key_states.device), diagonal=k-q-self.recent_budget).bool()
+        causal_heavy_recent_mask[:,:self.init_budget] = False
+        mask = torch.zeros_like(span).bool() # True is keep and False is throw away
+        span.masked_fill_( torch.logical_not(causal_heavy_recent_mask ),torch.finfo(span.dtype).min)
+        mask[:,:,:,:] = torch.tril(torch.ones(q,k,device=key_states.device), diagonal=k-q).bool()
+        mask = mask * torch.logical_not(causal_heavy_recent_mask)
+
+        values, indices = span.sort(dim=-1, descending=True)
+        if self.heavy_budget > 1.0:
+            heavy_budget = int(self.heavy_budget)
+        else:
+            heavy_budget = int(k * self.heavy_budget)
+        heavy_budget = heavy_budget
+        if self.usa_eval_mode == 'simple':
+            keep_indices = indices[:,:,:,:heavy_budget]
+            mask.scatter_(3, keep_indices, True)
+        else:
+            depth_thold = values[:,:,:,:1] - 2*self.usa_retrieve_depth # every mismatch addds a diff of 2
+            num_thold = values[:,:,:,heavy_budget-1:heavy_budget]
+            thold = torch.maximum(depth_thold, num_thold)
+            mask.masked_fill_(span >= thold, True)
+        # self.cache_budget_records.append(torch.mean(torch.sum(mask.float(), dim=-1)).mean().item())
+        # print(self.cache_budget_records)
+        return mask
+
     def compute_mask(self, key_states, query_states):
         bsz = query_states.shape[0]
         q = query_states.shape[-2]
@@ -474,8 +522,8 @@ class LlamaAttention_heavy_hitter(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
         self.ensure_gpu(past_key_value, hidden_states.device)
-
-        if q_len > 1:
+        
+        if q_len > 128:
             return_value =  self.flash_forward(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
@@ -551,7 +599,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
             attention_mask = attention_mask.masked_fill(boolean_mask == False, torch.finfo(attn_weights.dtype).min).view(1, 1, q_len, kv_seq_len)
             attn_weights = attn_weights + attention_mask
 
-        sparse_mask = self.compute_mask(key_states, query_states) # True = keep and False = throw away
+        sparse_mask = self.compute_mask_multi(key_states, query_states) # True = keep and False = throw away
         attn_weights.masked_fill_(torch.logical_not(sparse_mask), torch.finfo(attn_weights.dtype).min)
 
         
@@ -596,7 +644,6 @@ def load_usa_llama(config, path):
 
 
 def convert_usa(model, config, usa_modules, collect_stats, train_usa):
-
     for name, module in reversed(model._modules.items()):
 
         if len(list(module.children())) > 0:
