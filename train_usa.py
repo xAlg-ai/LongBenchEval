@@ -10,7 +10,14 @@ from inf_llm.utils import patch_hf, GreedySearch, patch_model_center
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 import gc
 import sys
-from inf_llm.baselines.usa_llama import convert_usa, load_usa_llama, reset_usa, set_train_usa_mode, set_eval_usa_mode, print_stats
+
+MODELNAME = os.environ.get("MODEL", "llama")
+if MODELNAME == "llama":
+    from inf_llm.baselines.usa_llama import convert_usa, load_usa, reset_usa, set_train_usa_mode, set_eval_usa_mode, print_stats
+elif MODELNAME == "mistral":
+    from inf_llm.baselines.usa_mistral import convert_usa, load_usa, reset_usa, set_train_usa_mode, set_eval_usa_mode, print_stats
+else:
+    raise NotImplementedError
 
 att_cfg_file = os.environ.get("ATT_CONFIG", None)
 
@@ -39,6 +46,8 @@ def parse_args():
     parser.add_argument("--loss", type=str, default='bce')
     parser.add_argument("--bce_alpha", type=float, default=20.0)
     parser.add_argument("--bce_beta", type=float, default=0.)
+    parser.add_argument('--usa_num_layers', type=int, default=3)
+    parser.add_argument('--usa_final_dim', type=int, default=32)
     
 
     args, extra_args = parser.parse_known_args()
@@ -59,7 +68,9 @@ def parse_args():
     conf.loss = args.loss
     conf.bce_alpha = args.bce_alpha
     conf.bce_beta = args.bce_beta
-    
+    conf.usa_num_layers = args.usa_num_layers
+    conf.usa_final_dim = args.usa_final_dim
+
     if not hasattr(conf.model, "tokenizer_path"):
         conf.model.tokenizer_path = conf.model.path
     if not hasattr(conf, "truncation"):
@@ -86,14 +97,15 @@ def get_model_and_tokenizer(config, args):
     config = AutoConfig.from_pretrained(config.path)
 
     config.lth_init_dim = 128
-    config.lth_final_dim = 32
+    config.lth_final_dim = args.usa_final_dim
     config.lth_thold = 0
     config.init_budget = args.edge_budget
     config.heavy_budget = args.token_budget
     config.recent_budget = args.edge_budget
     config.usa_retrieve_depth = 6
     config.usa_eval_mode = "vanilla"
-    usa_modules = load_usa_llama(config, args.load_usa)
+    config.lth_num_layers = args.usa_num_layers
+    usa_modules = load_usa(config, args.load_usa)
     usa_modules = usa_modules.bfloat16()
     model = convert_usa(model, config, usa_modules, collect_stats=True, train_usa=True)
 
@@ -140,7 +152,8 @@ def train(
     tr_truncate_len, 
     save_usa_path,
     usa_modules_ptr,
-    skip_first_examples = -1
+    skip_first_examples = -1,
+    finetune=False
 ):
     searcher = GreedySearch(model, tokenizer)
     cur = 0
@@ -154,12 +167,16 @@ def train(
         if i < skip_first_examples:
             continue
         gc.collect()
-        text_len += len(json_obj['text'])
-        text = text + "Passage: " + json_obj['text']
-        if text_len < tr_truncate_len * char_to_token_factor:
-            #accumulate more text
-            continue
-        prompt = train_prompt_format.format(text=text)
+        if not finetune:
+            text_len += len(json_obj['text'])
+            text = text + "Passage: " + json_obj['text']
+            if text_len < tr_truncate_len * char_to_token_factor:
+                #accumulate more text
+                continue
+
+            prompt = train_prompt_format.format(text=text)
+        else:
+            prompt = train_prompt_format.format(**json_obj)
         # reset values
         text = ""
         text_len = 0
@@ -260,5 +277,6 @@ if __name__ == '__main__':
                         train_data, valid_data,
                         train_prompt_format, valid_prompt_format,
                         max_gen, args.chunk_size, args.truncate_len,
-                        args.save_usa, usa_modules, args.skip_first_examples
+                        args.save_usa, usa_modules, args.skip_first_examples, 
+                        train_dataset != "openwebtext"
                        )

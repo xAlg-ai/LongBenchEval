@@ -14,12 +14,12 @@ from torch.cuda.amp import autocast
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 
-from transformers.models.llama.configuration_llama import LlamaConfig
-from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, LlamaAttention, apply_rotary_pos_emb, repeat_kv
+from transformers.models.mistral.configuration_mistral import MistralConfig
+from transformers.models.mistral.modeling_mistral import MistralRotaryEmbedding, MistralAttention, apply_rotary_pos_emb, repeat_kv
 from transformers.cache_utils import Cache
 from math import sqrt
 
-__all__ = ['convert_kvcache_llama_heavy_recent', 'LlamaAttention_heavy_hitter']
+__all__ = ['convert_kvcache_mistral_heavy_recent', 'MistralAttention_heavy_hitter']
 
 
 import torch
@@ -38,63 +38,6 @@ def memory_efficient_softmax(x, dim):
     # Compute softmax
     softmax_x = exp_x / torch.sum(exp_x, dim=dim, keepdim=True)
     return softmax_x
-
-
-
-# def evaluate_recall_precision(usa_module_ptr, position_embeddings, past_key_value, hidden_states):
-#         bsz, q_len, _ = hidden_states.size()
-#         query_states = usa_module_ptr.q_proj(hidden_states)
-#         key_states = usa_module_ptr.k_proj(hidden_states)
-        
-#         query_states = query_states.view(bsz, q_len, usa_module_ptr.num_heads, usa_module_ptr.head_dim).transpose(1, 2)
-#         key_states = key_states.view(bsz, q_len, usa_module_ptr.num_key_value_heads, usa_module_ptr.head_dim).transpose(1, 2)
-           
-#         if position_embeddings is None:
-#             print(
-#                 "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-#                 "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-#                 "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
-#                 "removed and `position_embeddings` will be mandatory."
-#             )
-#             cos, sin = usa_module_ptr.rotary_emb(key_states, position_ids)
-#         else:
-#             cos, sin = position_embeddings
-
-#         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-        
-#         if past_key_value is not None:
-#             # sin and cos are specific to RoPE models; cache_position needed for the static cache
-#             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-#             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-#         key_states = repeat_kv(key_states, self.num_key_value_groups)
-#         value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-
-#         kv_seq_len = key_states.shape[-2]
-
-
-#         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-#         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
-#             raise ValueError(
-#                 f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
-#                 f" {attn_weights.size()}"
-#             )
-
-#         if attention_mask is not None:
-#             if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-#                 raise ValueError(
-#                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-#                 )
-#             attn_weights = attn_weights + attention_mask
-#         elif q_len == kv_seq_len:
-#             boolean_mask = torch.tril(torch.ones(q_len, kv_seq_len, dtype=torch.bool, device=attn_weights.device))
-#             attention_mask = torch.zeros(q_len, kv_seq_len, dtype=torch.float16, device=attn_weights.device)
-#             attention_mask = attention_mask.masked_fill(boolean_mask == False, torch.finfo(attn_weights.dtype).min).view(1, 1, q_len, kv_seq_len)
-#             attn_weights = attn_weights + attention_mask
-
-#         sparse_mask = self.compute_mask(key_states, query_states) # True = keep and False = throw away
 
 
 
@@ -132,37 +75,18 @@ class USA(nn.Module):
         self.int_dim = usa_params['lth_int_dim']
         self.lth_final_dim = usa_params['lth_final_dim']
         self.lth_thold = usa_params['lth_thold']
-        self.num_layers = usa_params['lth_num_layers']
-        if self.num_layers == 3:
-            self.learning_to_hash_transformation_k = nn.ModuleList([nn.Sequential(nn.Linear(head_dim, self.int_dim), 
-                                          nn.SiLU(),
-                                          nn.Linear(self.int_dim, self.int_dim),
-                                          nn.SiLU(),
-                                          nn.Linear(self.int_dim, self.lth_final_dim)
-                                        ) for i in range(self.num_heads)])
-            self.learning_to_hash_transformation_q = nn.ModuleList([nn.Sequential(nn.Linear(head_dim, self.int_dim),
-                                          nn.SiLU(),
-                                          nn.Linear(self.int_dim, self.int_dim),
-                                          nn.SiLU(),
-                                          nn.Linear(self.int_dim, self.lth_final_dim)
-                                          ) for i in range(self.num_heads)])
-        elif self.num_layers == 2:
-            self.learning_to_hash_transformation_k = nn.ModuleList([nn.Sequential(nn.Linear(head_dim, self.int_dim), 
-                                          nn.SiLU(),
-                                          nn.Linear(self.int_dim, self.lth_final_dim)
-                                        ) for i in range(self.num_heads)])
-            self.learning_to_hash_transformation_q = nn.ModuleList([nn.Sequential(nn.Linear(head_dim, self.int_dim),
-                                          nn.SiLU(),
-                                          nn.Linear(self.int_dim, self.lth_final_dim)
-                                          ) for i in range(self.num_heads)])
-        elif self.num_layers == 1:
-
-            self.learning_to_hash_transformation_k = nn.ModuleList([nn.Sequential( 
-                                          nn.Linear(self.int_dim, self.lth_final_dim)
-                                        ) for i in range(self.num_heads)])
-            self.learning_to_hash_transformation_q = nn.ModuleList([nn.Sequential(
-                                          nn.Linear(self.int_dim, self.lth_final_dim)
-                                          ) for i in range(self.num_heads)])
+        self.learning_to_hash_transformation_k = nn.ModuleList([nn.Sequential(nn.Linear(head_dim, self.int_dim), 
+                                      nn.SiLU(),
+                                      nn.Linear(self.int_dim, self.int_dim),
+                                      nn.SiLU(),
+                                      nn.Linear(self.int_dim, self.lth_final_dim)
+                                    ) for i in range(self.num_heads)])
+        self.learning_to_hash_transformation_q = nn.ModuleList([nn.Sequential(nn.Linear(head_dim, self.int_dim),
+                                      nn.SiLU(),
+                                      nn.Linear(self.int_dim, self.int_dim),
+                                      nn.SiLU(),
+                                      nn.Linear(self.int_dim, self.lth_final_dim)
+                                      ) for i in range(self.num_heads)])
         
     def _split_heads(self, tensor, num_heads, attn_head_size):
         """
@@ -242,10 +166,10 @@ class USA(nn.Module):
         return embeddings
 
 
-class LlamaAttention_heavy_hitter(nn.Module):
+class MistralAttention_heavy_hitter(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig, layer_idx: Optional[int] = None):
+    def __init__(self, config: MistralConfig, layer_idx: Optional[int] = None):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -271,12 +195,16 @@ class LlamaAttention_heavy_hitter(nn.Module):
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
                 f" and `num_heads`: {self.num_heads})."
             )
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
-        self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
+        self.rotary_emb = MistralRotaryEmbedding(
+            self.head_dim,
+            max_position_embeddings=self.max_position_embeddings,
+            base=self.rope_theta,
+        )
 
         self.init_budget = config.init_budget
         self.heavy_budget = config.heavy_budget
@@ -356,12 +284,6 @@ class LlamaAttention_heavy_hitter(nn.Module):
            
             
         if position_embeddings is None:
-            print(
-                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
-                "removed and `position_embeddings` will be mandatory."
-            )
             cos, sin = self.rotary_emb(query_states, position_ids)
         else:
             cos, sin = position_embeddings
@@ -412,54 +334,6 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
             if self.layer_idx == 5:
                 print(self.overlaps) 
-
-
-    def compute_mask_multi(self, key_states, query_states):
-        bsz = query_states.shape[0]
-        q = query_states.shape[-2]
-        k = key_states.shape[-2]
-        if self.past_key_signatures is None:
-            span, K = self.usa_module(key_states.to(self.usa_module_dtype), query_states.to(self.usa_module_dtype), hard=True)
-            #self.past_key_signatures = K # TODO(test)
-            self.past_key_signatures = None
-        else:
-            # TODO(test)
-            current_q_embedding = self.usa_module.q_embedding(query_states.to(self.usa_module_dtype), hard=True)
-            current_k_embeddings = self.usa_module.k_embedding(key_states[:,:,self.past_key_signatures.shape[-2]:,:].to(self.usa_module_dtype), hard=True)
-            total_k_embeddings = torch.cat([self.past_key_signatures, current_k_embeddings], dim=-2)
-            self.past_key_signatures = total_k_embeddings
-            current_q_embedding = rearrange(current_q_embedding, 'b h t d -> (b h) t d')
-            total_k_embeddings = rearrange(total_k_embeddings, 'b h s d -> (b h) d s')
-            span = torch.empty(bsz * self.num_heads, q, k, dtype=current_q_embedding.dtype,
-                                   device=current_q_embedding.device)
-            span = rearrange(torch.baddbmm(span, current_q_embedding, total_k_embeddings, beta=0, alpha=1.0),
-                                 '(b h) t s -> b h t s', h=self.num_heads)
-
-
-        causal_heavy_recent_mask = torch.tril(torch.ones(q,k,device=key_states.device), diagonal=k-q-self.recent_budget).bool()
-        causal_heavy_recent_mask[:,:self.init_budget] = False
-        mask = torch.zeros_like(span).bool() # True is keep and False is throw away
-        span.masked_fill_( torch.logical_not(causal_heavy_recent_mask ),torch.finfo(span.dtype).min)
-        mask[:,:,:,:] = torch.tril(torch.ones(q,k,device=key_states.device), diagonal=k-q).bool()
-        mask = mask * torch.logical_not(causal_heavy_recent_mask)
-
-        values, indices = span.sort(dim=-1, descending=True)
-        if self.heavy_budget > 1.0:
-            heavy_budget = int(self.heavy_budget)
-        else:
-            heavy_budget = int(k * self.heavy_budget)
-        heavy_budget = heavy_budget
-        if self.usa_eval_mode == 'simple':
-            keep_indices = indices[:,:,:,:heavy_budget]
-            mask.scatter_(3, keep_indices, True)
-        else:
-            depth_thold = values[:,:,:,:1] - 2*self.usa_retrieve_depth # every mismatch addds a diff of 2
-            num_thold = values[:,:,:,heavy_budget-1:heavy_budget]
-            thold = torch.maximum(depth_thold, num_thold)
-            mask.masked_fill_(span >= thold, True)
-        # self.cache_budget_records.append(torch.mean(torch.sum(mask.float(), dim=-1)).mean().item())
-        # print(self.cache_budget_records)
-        return mask
 
     def compute_mask(self, key_states, query_states):
         bsz = query_states.shape[0]
@@ -541,8 +415,8 @@ class LlamaAttention_heavy_hitter(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
         self.ensure_gpu(past_key_value, hidden_states.device)
-        
-        if q_len > 128 or self.train_usa: # 128 is arbitrary for OFFSET. Might run into trouble later
+
+        if q_len > 1 or self.train_usa:
             return_value =  self.flash_forward(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
@@ -551,7 +425,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
-                position_embeddings=position_embeddings,
+                #position_embeddings=position_embeddings,
                 **kwargs,
             )
             if self.collect_stats or self.train_usa:
@@ -574,12 +448,6 @@ class LlamaAttention_heavy_hitter(nn.Module):
            
             
         if position_embeddings is None:
-            print(
-                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
-                "removed and `position_embeddings` will be mandatory."
-            )
             cos, sin = self.rotary_emb(value_states, position_ids)
         else:
             cos, sin = position_embeddings
@@ -618,7 +486,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
             attention_mask = attention_mask.masked_fill(boolean_mask == False, torch.finfo(attn_weights.dtype).min).view(1, 1, q_len, kv_seq_len)
             attn_weights = attn_weights + attention_mask
 
-        sparse_mask = self.compute_mask_multi(key_states, query_states) # True = keep and False = throw away
+        sparse_mask = self.compute_mask(key_states, query_states) # True = keep and False = throw away
         attn_weights.masked_fill_(torch.logical_not(sparse_mask), torch.finfo(attn_weights.dtype).min)
 
         
@@ -650,8 +518,7 @@ def load_usa(config, path):
     CFG = {
     'lth_int_dim' : config.lth_init_dim,
     'lth_final_dim': config.lth_final_dim,
-    'lth_thold' : config.lth_thold,
-    'lth_num_layers': config.lth_num_layers
+    'lth_thold' : config.lth_thold
     }
     modules = []
     for i in range(config.num_hidden_layers):
@@ -664,14 +531,15 @@ def load_usa(config, path):
 
 
 def convert_usa(model, config, usa_modules, collect_stats, train_usa):
+
     for name, module in reversed(model._modules.items()):
 
         if len(list(module.children())) > 0:
             model._modules[name] = convert_usa(module, config, usa_modules, collect_stats, train_usa)
 
-        if isinstance(module, LlamaAttention):
+        if isinstance(module, MistralAttention):
             device = next(module.parameters()).device
-            new_module = LlamaAttention_heavy_hitter(config, module.layer_idx).bfloat16().to(device)
+            new_module = MistralAttention_heavy_hitter(config, module.layer_idx).bfloat16().to(device)
             new_module.load_state_dict(module.state_dict())
             new_module.usa_module = usa_modules[module.layer_idx]
             new_module.usa_module_dtype = usa_modules[module.layer_idx].learning_to_hash_transformation_k[0][0].weight.dtype
@@ -690,7 +558,7 @@ def reset_usa(model):
         if len(list(module.children())) > 0:
             model._modules[name] = reset_usa(module)
 
-        if isinstance(module, LlamaAttention_heavy_hitter):
+        if isinstance(module, MistralAttention_heavy_hitter):
             module._reset_state()
 
     return model
@@ -703,7 +571,7 @@ def set_train_usa_mode(model, loss_func=None, optimizer=None):
         if len(list(module.children())) > 0:
             model._modules[name] = set_train_usa_mode(module, loss_func, optimizer)
 
-        if isinstance(module, LlamaAttention_heavy_hitter):
+        if isinstance(module, MistralAttention_heavy_hitter):
             module.train_usa = True
             if loss_func is not None:
                 module.tr_loss_func = loss_func
@@ -720,7 +588,7 @@ def set_eval_usa_mode(model):
         if len(list(module.children())) > 0:
             model._modules[name] = set_eval_usa_mode(module)
 
-        if isinstance(module, LlamaAttention_heavy_hitter):
+        if isinstance(module, MistralAttention_heavy_hitter):
             module.train_usa = False
 
     return model
@@ -733,7 +601,7 @@ def print_stats(model):
         if len(list(module.children())) > 0:
             model._modules[name] = print_stats(module)
 
-        if isinstance(module, LlamaAttention_heavy_hitter):
+        if isinstance(module, MistralAttention_heavy_hitter):
             if module.layer_idx == 5:
                 print(module.layer_idx)
                 print(module.overlaps)
