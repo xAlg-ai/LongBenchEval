@@ -61,16 +61,14 @@ class GreedySearch:
                     )
                     logits, past_key_values = out.logits, out.past_key_values
 
-                for j in range(OFF-1): # simulating the retreival here. q = 1
-                    #print("st:", input_ids.size(1) - (OFF-j))
-                    out = self.model(
-                        input_ids = input_ids[:, -(OFF - j):-(OFF-j-1)],
-                        attention_mask = attention_mask[:,:-(OFF-j-1)],
+                out = self.model(
+                        input_ids = input_ids[:, -OFF:-1],
+                        attention_mask = attention_mask[:,:-1],
                         use_cache = True,
                         return_dict = True,
                         past_key_values = past_key_values
-                    )
-                    logits, past_key_values = out.logits, out.past_key_values
+                )
+                logits, past_key_values = out.logits, out.past_key_values
 
                 out = self.model(
                     input_ids = input_ids[:, -1:],
