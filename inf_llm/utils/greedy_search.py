@@ -32,7 +32,7 @@ class GreedySearch:
             result = self._decode(input_ids, **kwargs)
         return result
 
-    def _decode(self, input_ids, max_length=100, extra_end_token_ids=[], chunk_size: int = 4096, output=False, prefetch_offset=1):
+    def _decode(self, input_ids, max_length=100, extra_end_token_ids=[], chunk_size: int = 4096, output=False, prefetch_offset=1, use_chunk_offset=False):
         if input_ids.dim() == 1:
             input_ids = input_ids[None, :]
         input_ids = input_ids.cuda()
@@ -61,14 +61,27 @@ class GreedySearch:
                     )
                     logits, past_key_values = out.logits, out.past_key_values
 
-                out = self.model(
-                        input_ids = input_ids[:, -OFF:-1],
-                        attention_mask = attention_mask[:,:-1],
-                        use_cache = True,
-                        return_dict = True,
-                        past_key_values = past_key_values
-                )
-                logits, past_key_values = out.logits, out.past_key_values
+                if OFF > 1 and use_chunk_offset:
+                        out = self.model(
+                            input_ids = input_ids[:, -OFF:-1],
+                            attention_mask = attention_mask[:,:-1],
+                            use_cache = True,
+                            return_dict = True,
+                            past_key_values = past_key_values
+                        )
+                        logits, past_key_values = out.logits, out.past_key_values
+
+                else:
+                    for j in range(OFF-1): # simulating the retreival here. q = 1
+                         out = self.model(
+                                 input_ids = input_ids[:, -(OFF - j):-(OFF-j-1)],
+                                 attention_mask = attention_mask[:,:-(OFF-j-1)],
+                                 use_cache = True,
+                                 return_dict = True,
+                                 past_key_values = past_key_values
+                                 )
+                         logits, past_key_values = out.logits, out.past_key_values
+
 
                 out = self.model(
                     input_ids = input_ids[:, -1:],
