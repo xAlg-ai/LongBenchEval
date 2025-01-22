@@ -11,13 +11,22 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 #from transformers.models.llama.modeling_llama import FAISS,dump_faiss_stats,save_usa,load_usa, USA_STAT
 import gc
 import sys
-from inf_llm.baselines.h2O_llama_from_ds import convert_h2o,reset_h2o
-from inf_llm.baselines.doublesparse_llama import convert_kvcache_llama_heavy_recent, convert_llama_channel_config
-from inf_llm.baselines.streaming_llama import convert_streaming
-from inf_llm.baselines.usa_llama import convert_usa, load_usa_llama, reset_usa, set_train_usa_mode
-from inf_llm.baselines.quest_attention import enable_quest_attention_eval
-from inf_llm.baselines.quest import convert_quest
-from inf_llm.baselines.topk_llama import convert_exact_topk
+
+
+MODELNAME = os.environ.get("MODEL", "llama")
+if MODELNAME == "llama":
+    from inf_llm.baselines.usa_llama import convert_usa, load_usa, reset_usa, set_train_usa_mode, set_eval_usa_mode, print_stats
+    from inf_llm.baselines.h2O_llama_from_ds import convert_h2o,reset_h2o
+    from inf_llm.baselines.doublesparse_llama import convert_kvcache_heavy_recent, convert_channel_config
+    from inf_llm.baselines.streaming_llama import convert_streaming
+    from inf_llm.baselines.quest_attention import enable_quest_attention_eval
+    from inf_llm.baselines.quest import convert_quest
+    from inf_llm.baselines.topk_llama import convert_exact_topk
+elif MODELNAME == "mistral":
+    from inf_llm.baselines.usa_mistral import convert_usa, load_usa, reset_usa, set_train_usa_mode, set_eval_usa_mode, print_stats
+    from inf_llm.baselines.doublesparse_mistral import convert_kvcache_heavy_recent, convert_channel_config
+else:
+    raise NotImplementedError
 
 att_cfg_file = os.environ.get("ATT_CONFIG", None)
 
@@ -54,6 +63,8 @@ def parse_args():
     parser.add_argument('--infllm_topk', type=int, default=16)
     parser.add_argument('--infllm_repr_topk', type=int, default=4)
     parser.add_argument('--infllm_exc_block_size', type=int, default=32)
+    parser.add_argument('--usa_num_layers', type=int, default=3)
+    parser.add_argument('--usa_final_dim', type=int, default=32)
 
     args, extra_args = parser.parse_known_args()
     conf = OmegaConf.load(args.config_path)
@@ -92,6 +103,8 @@ def parse_args():
     conf.model.topk = args.infllm_topk
     conf.model.repr_topk = args.infllm_repr_topk
     conf.model.exc_block_size = args.infllm_exc_block_size
+    conf.usa_num_layers = args.usa_num_layers
+    conf.usa_final_dim = args.usa_final_dim
 
     if not hasattr(conf.model, "tokenizer_path"):
         conf.model.tokenizer_path = conf.model.path
@@ -139,12 +152,12 @@ def get_model_and_tokenizer(config, baseline, token_budget):
                 channel_config = None
                 with open(channel_path, "r") as f:
                     channel_config = json.load(f)
-                    model = convert_kvcache_llama_heavy_recent(model, config, heavy_const=args.token_budget, 
+                    model = convert_kvcache_heavy_recent(model, config, heavy_const=args.token_budget, 
                             group_factor=128//args.ds_num_channels, label_bits=args.ds_label_bits, init_const=args.edge_budget, local_const=args.edge_budget,
                             collect_stats=args.collect_stats)
                     #group_factor = 8 => sorted channels = 128 / 8
                     #label_bits = 16 # no quantization ; 4 => 4 bit quantization
-                    model = convert_llama_channel_config(model, channel_config, "q")
+                    model = convert_channel_config(model, channel_config, "q")
             elif baseline == "inf-llm":
                 model = patch_hf(model, baseline, **config)
             elif baseline == "streaming":
@@ -153,14 +166,15 @@ def get_model_and_tokenizer(config, baseline, token_budget):
             elif baseline == "usa":
                 config = AutoConfig.from_pretrained(config.path)
                 config.lth_init_dim = 128
-                config.lth_final_dim = 32
+                config.lth_final_dim = args.usa_final_dim
                 config.lth_thold = 0
                 config.init_budget = args.edge_budget
                 config.heavy_budget = args.token_budget
                 config.recent_budget = args.edge_budget
                 config.usa_retrieve_depth = 6
                 config.usa_eval_mode = args.usa_ret_mode
-                usa_modules = load_usa_llama(config, args.load_usa)
+                config.lth_num_layers = args.usa_num_layers
+                usa_modules = load_usa(config, args.load_usa)
                 if args.train_usa:
                     usa_modules = usa_modules.bfloat16()
                 model = convert_usa(model, config, usa_modules, collect_stats = args.collect_stats, train_usa=args.train_usa)
@@ -441,7 +455,8 @@ def get_pred(
             max_length=max_gen,
             chunk_size=gen_chunk_size,
             extra_end_token_ids=extra_end_token_ids,
-            prefetch_offset=prefetch_offset
+            prefetch_offset=prefetch_offset,
+            use_chunk_offset=(args.baseline == "usa")
         )
 
         pred = post_process(output[0], model_name, dataset)

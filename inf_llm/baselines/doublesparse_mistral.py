@@ -15,8 +15,8 @@ from torch.cuda.amp import autocast
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 
-from transformers.models.llama.configuration_llama import LlamaConfig
-from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, LlamaAttention, apply_rotary_pos_emb, repeat_kv
+from transformers.models.mistral.configuration_mistral import MistralConfig
+from transformers.models.mistral.modeling_mistral import MistralRotaryEmbedding, MistralAttention, apply_rotary_pos_emb, repeat_kv
 from transformers.cache_utils import Cache
 from math import sqrt
 
@@ -36,10 +36,10 @@ def pseudo_quantize(tensor, q_bit):
 
     return dequantized
 
-class LlamaAttention_heavy_hitter(nn.Module):
+class MistralAttention_heavy_hitter(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig, layer_idx: Optional[int] = None):
+    def __init__(self, config: MistralConfig, layer_idx: Optional[int] = None):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -75,13 +75,16 @@ class LlamaAttention_heavy_hitter(nn.Module):
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
                 f" and `num_heads`: {self.num_heads})."
             )
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
-        self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
-
+        self.rotary_emb = MistralRotaryEmbedding(
+            self.head_dim,
+            max_position_embeddings=self.max_position_embeddings,
+            base=self.rope_theta,
+        )
         # stats
         self.collect_stats = False
         self.overlaps = {}
@@ -119,12 +122,6 @@ class LlamaAttention_heavy_hitter(nn.Module):
            
             
         if position_embeddings is None:
-            print(
-                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
-                "removed and `position_embeddings` will be mandatory."
-            )
             cos, sin = self.rotary_emb(query_states, position_ids)
         else:
             cos, sin = position_embeddings
@@ -237,7 +234,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
-                position_embeddings=position_embeddings,
+                #position_embeddings=position_embeddings,
                 **kwargs,
             )
             if self.collect_stats:
@@ -251,39 +248,15 @@ class LlamaAttention_heavy_hitter(nn.Module):
             self.offload_if_necessary_cpu(past_key_value)
             return return_value
 
-        if self.config.pretraining_tp > 1:
-            key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
-            query_slices = self.q_proj.weight.split(
-                (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
-            )
-            key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
-            value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
-
-            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
-            query_states = torch.cat(query_states, dim=-1)
-
-            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
-            key_states = torch.cat(key_states, dim=-1)
-
-            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
-            value_states = torch.cat(value_states, dim=-1)
-
-        else:
-            query_states = self.q_proj(hidden_states)
-            key_states = self.k_proj(hidden_states)
-            value_states = self.v_proj(hidden_states)
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
 
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
             
         if position_embeddings is None:
-            print(
-                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
-                "removed and `position_embeddings` will be mandatory."
-            )
             cos, sin = self.rotary_emb(value_states, position_ids)
         else:
             cos, sin = position_embeddings
@@ -415,12 +388,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-        if self.config.pretraining_tp > 1:
-            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-            o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
-        else:
-            attn_output = self.o_proj(attn_output)
+        attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
             attn_weights = None
@@ -436,9 +404,9 @@ def convert_kvcache_heavy_recent(model, config, heavy_const, group_factor, label
         if len(list(module.children())) > 0:
             model._modules[name] = convert_kvcache_heavy_recent(module, config, heavy_const, group_factor, label_bits, init_const, local_const, collect_stats)
 
-        if isinstance(module, LlamaAttention):
+        if isinstance(module, MistralAttention):
             device = next(module.parameters()).device
-            new_module = LlamaAttention_heavy_hitter(config, module.layer_idx).bfloat16().to(device)
+            new_module = MistralAttention_heavy_hitter(config, module.layer_idx).bfloat16().to(device)
             new_module.load_state_dict(module.state_dict())
             new_module.heavy_const = heavy_const
             new_module.init_const = init_const
@@ -458,7 +426,7 @@ def convert_channel_config(model, channel_config, selected_channel="k"):
 
     for name, module in model.named_modules():
 
-        if isinstance(module, LlamaAttention_heavy_hitter):
+        if isinstance(module, MistralAttention_heavy_hitter):
             device = next(module.parameters()).device
             module.sorted_channel = torch.tensor(channel_config[name + selected_channel]).to(device)
 
@@ -469,7 +437,7 @@ def change_heavy_const(model, heavy_const=128, group_factor=4, label_bits=4):
 
     for name, module in model.named_modules():
 
-        if isinstance(module, LlamaAttention_heavy_hitter):
+        if isinstance(module, MistralAttention_heavy_hitter):
             
             module.heavy_const = heavy_const
             module.group_factor = group_factor
