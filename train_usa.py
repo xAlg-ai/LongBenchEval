@@ -11,7 +11,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 import gc
 import sys
 
-MODELNAME = os.environ.get("MODEL", "llama")
+MODELNAME = os.environ.get("MODEL", None)
 if MODELNAME == "llama":
     from inf_llm.baselines.usa_llama import convert_usa, load_usa, reset_usa, set_train_usa_mode, set_eval_usa_mode, print_stats
 elif MODELNAME == "mistral":
