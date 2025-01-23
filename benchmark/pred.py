@@ -25,6 +25,7 @@ if MODELNAME == "llama":
 elif MODELNAME == "mistral":
     from inf_llm.baselines.usa_mistral import convert_usa, load_usa, reset_usa, set_train_usa_mode, set_eval_usa_mode, print_stats
     from inf_llm.baselines.doublesparse_mistral import convert_kvcache_heavy_recent, convert_channel_config
+    from inf_llm.baselines.quest_mistral import convert_quest
 else:
     raise NotImplementedError
 
