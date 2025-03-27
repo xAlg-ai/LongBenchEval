@@ -66,6 +66,7 @@ def parse_args():
     parser.add_argument('--infllm_exc_block_size', type=int, default=32)
     parser.add_argument('--usa_num_layers', type=int, default=3)
     parser.add_argument('--usa_final_dim', type=int, default=32)
+    parser.add_argument('--overwrite', action='store_true', default=False)
 
     args, extra_args = parser.parse_known_args()
     conf = OmegaConf.load(args.config_path)
@@ -106,6 +107,7 @@ def parse_args():
     conf.model.exc_block_size = args.infllm_exc_block_size
     conf.usa_num_layers = args.usa_num_layers
     conf.usa_final_dim = args.usa_final_dim
+    conf.overwrite = args.overwrite
 
     if not hasattr(conf.model, "tokenizer_path"):
         conf.model.tokenizer_path = conf.model.path
@@ -118,7 +120,21 @@ def parse_args():
     for d in datasets_list:
         conf.datasets.append(d.strip())
     conf.chunk_size = args.chunk_size
-    print(conf)
+
+
+    # extra logging stuff
+    import git
+    def get_git_commit_id():
+        repo = git.Repo(search_parent_directories=True)
+        commit_id = repo.head.object.hexsha
+        return commit_id
+    conf.git_commid_id = get_git_commit_id()
+    
+    import datetime
+    now=datetime.datetime.now()
+    timestamp = now.strftime("%Y%m%dT%H-%M-%S")
+    conf.timestamp = timestamp
+
     return conf
 
 
@@ -484,6 +500,11 @@ if __name__ == '__main__':
     args = parse_args()
 
     dump_cfg = args.output_dir_path + "config." + '-'.join(args.datasets) + '.yaml'
+
+    if os.path.isfile(dump_cfg) and not(args.overwrite):
+        print("Overwriting the file:", dump_cfg, "to continue pass --overwrite")
+        raise ValueError("pass correct directory or --overwrite")
+
     with open(dump_cfg, "w") as f:
         OmegaConf.save(config=args, f=dump_cfg)
 
@@ -491,6 +512,7 @@ if __name__ == '__main__':
     # define your model
     model, tokenizer = get_model_and_tokenizer(args.model, args.baseline, args.token_budget)
     output_dir_path = args.output_dir_path
+
 
     datasets = args.datasets
 
