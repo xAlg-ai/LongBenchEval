@@ -29,6 +29,10 @@ import numpy as np
 from einops import rearrange
 
 import torch
+import os 
+
+CENTER=os.environ.get("CENTER", 0)
+print("CENTER", CENTER)
 
 def memory_efficient_softmax(x, dim):
     # Subtract max for numerical stability (log-sum-exp trick)
@@ -122,6 +126,19 @@ DEFAULT_USA_CFG = {
     'lth_thold' : 0
 }
 
+
+class IpToCS(nn.Module):
+    def __init__(self):
+        super(IpToCS, self).__init__()
+       
+    def forward(self, x):
+        # x = *,head_dim
+        norm  = x.norm(dim=-1).unsqueeze(-1)# *,1
+        M = norm.max().item() + 1e-3
+        new_cord = torch.sqrt(torch.nn.functional.relu(M**2 - norm**2))
+        return torch.cat([x, new_cord], dim=-1)
+ 
+
 class USA(nn.Module):
     def __init__(self, num_heads, head_dim, usa_params = DEFAULT_USA_CFG):
         super(USA, self).__init__()
@@ -133,6 +150,7 @@ class USA(nn.Module):
         self.lth_final_dim = usa_params['lth_final_dim']
         self.lth_thold = usa_params['lth_thold']
         self.num_layers = usa_params['lth_num_layers']
+        self.center = bool(CENTER)
         if self.num_layers == 3:
             self.learning_to_hash_transformation_k = nn.ModuleList([nn.Sequential(nn.Linear(head_dim, self.int_dim), 
                                           nn.SiLU(),
@@ -158,11 +176,24 @@ class USA(nn.Module):
         elif self.num_layers == 1:
 
             self.learning_to_hash_transformation_k = nn.ModuleList([nn.Sequential( 
-                                          nn.Linear(self.int_dim, self.lth_final_dim)
+                                          nn.Linear(self.head_dim, self.lth_final_dim)
                                         ) for i in range(self.num_heads)])
             self.learning_to_hash_transformation_q = nn.ModuleList([nn.Sequential(
-                                          nn.Linear(self.int_dim, self.lth_final_dim)
+                                          nn.Linear(self.head_dim, self.lth_final_dim)
                                           ) for i in range(self.num_heads)])
+
+        elif self.num_layers == 0:
+            print("Implementing LSH for baseline")
+            self.learning_to_hash_transformation = nn.ModuleList([nn.Sequential( 
+                                          IpToCS(),
+                                          nn.Linear(self.head_dim + 1, self.lth_final_dim)
+                                        ) for i in range(self.num_heads)])
+            self.learning_to_hash_transformation_k =  self.learning_to_hash_transformation
+            self.learning_to_hash_transformation_q =  self.learning_to_hash_transformation
+            for i in range(self.num_heads):
+                    nn.init.normal_(self.learning_to_hash_transformation[i][1].weight)
+
+
         
     def _split_heads(self, tensor, num_heads, attn_head_size):
         """
@@ -181,8 +212,16 @@ class USA(nn.Module):
         Qlifted = torch.zeros((b,a,sq,self.lth_final_dim), device=Q.device, dtype=Q.dtype)
         
         for i in range(self.num_heads):
-            Klifted[:,i,:,:] = self.learning_to_hash_transformation_k[i](K[:,i,:,:])
-            Qlifted[:,i,:,:] = self.learning_to_hash_transformation_q[i](Q[:,i,:,:])
+
+            k = K[:,i,:,:]
+            q = Q[:,i,:,:]
+            if self.center:
+                mean = k.mean(dim=[0,1]).unsqueeze(0).unsqueeze(0)
+                std =  k.std(dim=[0,1]).unsqueeze(0).unsqueeze(0)
+                k = (k - mean) / (std + 1e-6)
+                q = (q - mean) / (std + 1e-6)
+            Klifted[:,i,:,:] = self.learning_to_hash_transformation_k[i](k)
+            Qlifted[:,i,:,:] = self.learning_to_hash_transformation_q[i](q)
 
         if hard:
             Q = ste_sign(Qlifted)
@@ -411,7 +450,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
             self.overlaps[kv_seq_len][4] = sqrt(self.overlaps[kv_seq_len][1] / self.overlaps[kv_seq_len][2] - self.overlaps[kv_seq_len][3]**2)
 
             if self.layer_idx == 5:
-                print(self.overlaps) 
+                print(self.overlaps)
 
 
     def compute_mask_multi(self, key_states, query_states):
@@ -674,7 +713,7 @@ def convert_usa(model, config, usa_modules, collect_stats, train_usa):
             new_module = LlamaAttention_heavy_hitter(config, module.layer_idx).bfloat16().to(device)
             new_module.load_state_dict(module.state_dict())
             new_module.usa_module = usa_modules[module.layer_idx]
-            new_module.usa_module_dtype = usa_modules[module.layer_idx].learning_to_hash_transformation_k[0][0].weight.dtype
+            new_module.usa_module_dtype = usa_modules[module.layer_idx].learning_to_hash_transformation_k[0][-1].weight.dtype
             model._modules[name] = new_module
             model._modules[name].flash_forward = module.forward
             model._modules[name].collect_stats = collect_stats
