@@ -15,7 +15,7 @@ import sys
 
 MODELNAME = os.environ.get("MODEL", None)
 if MODELNAME == "llama":
-    from inf_llm.baselines.usa_llama import convert_usa, load_usa, reset_usa, set_train_usa_mode, set_eval_usa_mode, print_stats
+    from hashattention_research.hashattention_llama import convert_usa, load_usa, reset_usa, set_train_usa_mode, set_eval_usa_mode, print_stats
     from inf_llm.baselines.h2O_llama_from_ds import convert_h2o,reset_h2o
     from inf_llm.baselines.doublesparse_llama import convert_kvcache_heavy_recent, convert_channel_config
     from inf_llm.baselines.streaming_llama import convert_streaming
@@ -23,7 +23,7 @@ if MODELNAME == "llama":
     from inf_llm.baselines.quest import convert_quest
     from inf_llm.baselines.topk_llama import convert_exact_topk
 elif MODELNAME == "mistral":
-    from inf_llm.baselines.usa_mistral import convert_usa, load_usa, reset_usa, set_train_usa_mode, set_eval_usa_mode, print_stats
+    from hashattentiohn_research.usa_mistral import convert_usa, load_usa, reset_usa, set_train_usa_mode, set_eval_usa_mode, print_stats
     from inf_llm.baselines.doublesparse_mistral import convert_kvcache_heavy_recent, convert_channel_config
     from inf_llm.baselines.quest_mistral import convert_quest
 else:
@@ -52,6 +52,8 @@ def parse_args():
     parser.add_argument("--samples", type=str, default=None)
     parser.add_argument("--prefetch_offset", type=int, default=1)
     parser.add_argument("--token_budget", type=float, default=4096)
+    parser.add_argument("--sampling_budget", type=float, default=0)
+    parser.add_argument("--hat_sampling", action="store_true", default=False)
     parser.add_argument("--edge_budget", type=int, default=128)
     parser.add_argument('--baseline', type=str, default=None)
     parser.add_argument('--collect_stats', action='store_true', default=False)
@@ -93,6 +95,8 @@ def parse_args():
         conf.samples = None
     conf.baseline = args.baseline
     conf.token_budget = args.token_budget
+    conf.sampling_budget = args.sampling_budget
+    conf.hat_sampling = args.hat_sampling
     conf.edge_budget = args.edge_budget
     conf.prefetch_offset = args.prefetch_offset
     conf.collect_stats = args.collect_stats
@@ -188,6 +192,8 @@ def get_model_and_tokenizer(config, baseline, token_budget):
                 config.init_budget = args.edge_budget
                 config.heavy_budget = args.token_budget
                 config.recent_budget = args.edge_budget
+                config.sampling_budget = args.sampling_budget
+                config.hat_sampling = args.hat_sampling
                 config.usa_retrieve_depth = 6
                 config.usa_eval_mode = args.usa_ret_mode
                 config.lth_num_layers = args.usa_num_layers
