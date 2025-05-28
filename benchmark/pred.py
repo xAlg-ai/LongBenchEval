@@ -15,7 +15,7 @@ import sys
 
 MODELNAME = os.environ.get("MODEL", None)
 if MODELNAME == "llama":
-    from hashattention_research.hashattention_llama import convert_usa, load_usa, reset_usa, set_train_usa_mode, set_eval_usa_mode, print_stats
+    from hashattention.hashattention_llama import convert_usa, load_usa, reset_usa, set_train_usa_mode, set_eval_usa_mode, print_stats
     from inf_llm.baselines.h2O_llama_from_ds import convert_h2o,reset_h2o
     from inf_llm.baselines.doublesparse_llama import convert_kvcache_heavy_recent, convert_channel_config
     from inf_llm.baselines.streaming_llama import convert_streaming
@@ -23,7 +23,7 @@ if MODELNAME == "llama":
     from inf_llm.baselines.quest import convert_quest
     from inf_llm.baselines.topk_llama import convert_exact_topk
 elif MODELNAME == "mistral":
-    from hashattentiohn_research.usa_mistral import convert_usa, load_usa, reset_usa, set_train_usa_mode, set_eval_usa_mode, print_stats
+    from hashattention.usa_mistral import convert_usa, load_usa, reset_usa, set_train_usa_mode, set_eval_usa_mode, print_stats
     from inf_llm.baselines.doublesparse_mistral import convert_kvcache_heavy_recent, convert_channel_config
     from inf_llm.baselines.quest_mistral import convert_quest
 else:
